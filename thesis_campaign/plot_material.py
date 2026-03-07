@@ -82,6 +82,9 @@ def plot_delta_t_series(df_delta: pd.DataFrame, out_png: str, is_log: bool = Fal
     title_suffix = "(Log10)" if is_log else "(Lineal)"
     
     ax.plot(df_delta["toa_s"], df_delta[col], linewidth=1.2)
+    if is_log:
+        ax.set_ylim([-5, 0.5])
+        
     _add_stage_shading(ax, df_delta, is_time=True)
     
     ax.set_xlabel("Tiempo real del ensayo (s)")
@@ -155,7 +158,12 @@ def plot_ewma_cusum(df_delta: pd.DataFrame, alpha: float, cusum_k: float, cusum_
     x = df_delta["log10_dt"].to_numpy(dtype=float)
 
     ewma = np.zeros_like(x)
-    ewma[0] = x[0]
+    warmup_n = min(50, len(x))
+    if warmup_n > 0:
+        ewma[0] = np.median(x[:warmup_n])
+    else:
+        ewma[0] = x[0] if len(x) > 0 else 0
+        
     for i in range(1, len(x)):
         ewma[i] = alpha * x[i] + (1 - alpha) * ewma[i-1]
 
@@ -243,6 +251,13 @@ def plot_blind_prpd(df_delta: pd.DataFrame, out_png: str):
     ax.set_xlabel("Fase Ciega Reconstruida (Grados)")
     ax.set_ylabel("Amplitud Peak (V)")
     ax.set_title("Phase-Resolved Partial Discharge (PRPD) - Blind Sync @ 50Hz")
+    
+    # Add textual note about blind phase reconstruction
+    ax.text(0.5, -0.16, 
+            "Nota: La fase se reconstruye desde el tiempo de llegada del evento asumiendo sincronía a 50 Hz;\nno existe referencia de fase AC medida.", 
+            horizontalalignment='center', verticalalignment='top', 
+            transform=ax.transAxes, fontsize=9, color='gray', style='italic')
+
     ax.grid(True, linestyle=":", alpha=0.3)
     
     plt.tight_layout()
