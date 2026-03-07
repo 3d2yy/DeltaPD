@@ -235,30 +235,74 @@ def plot_blind_prpd(df_delta: pd.DataFrame, out_png: str):
         
     fig, ax = plt.subplots(figsize=(8, 6))
     
-    x = df_delta["prpd_phase_deg"].to_numpy()
-    y = df_delta["peak_v"].to_numpy()
+    x_all = df_delta["prpd_phase_deg"].to_numpy()
+    y_raw_all = df_delta["peak_v"].to_numpy()
     
-    # 2D Histogram for PRPD density scatter
-    h = ax.hist2d(x, y, bins=[360, 100], cmap="turbo", range=[[0, 360], [0, np.max(y)*1.1]], cmin=1)
-    fig.colorbar(h[3], ax=ax, label="Conteos")
+    # Asignar signo fisiológico: semiciclo positivo (0-180) y negativo (180-360)
+    y_all = np.where((x_all >= 0) & (x_all <= 180), y_raw_all, -y_raw_all)
     
-    # Overlay a sine wave to guide the eye
+    # --- Filtrado de outliers de fase para visualización ---
+    # Encontrar centroides de los dos clusters
+    theta2 = np.deg2rad(x_all) * 2
+    mean_angle = np.arctan2(np.mean(np.sin(theta2)), np.mean(np.cos(theta2))) / 2.0
+    center1 = np.rad2deg(mean_angle) % 360
+    center2 = (center1 + 180) % 360
+    
+    d1 = np.minimum(np.abs(x_all - center1), 360 - np.abs(x_all - center1))
+    d2 = np.minimum(np.abs(x_all - center2), 360 - np.abs(x_all - center2))
+    d_min = np.minimum(d1, d2)
+    
+    median_d = np.median(d_min)
+    mad = np.median(np.abs(d_min - median_d))
+    threshold = median_d + 2.5 * max(mad * 1.4826, 5.0)
+    inlier_mask = d_min <= threshold
+    
+    x = x_all[inlier_mask]
+    y = y_all[inlier_mask]
+    
+    # Dibujar outliers en gris detrás
+    if np.sum(~inlier_mask) > 0:
+        ax.scatter(x_all[~inlier_mask], y_all[~inlier_mask], c="lightgray", s=6, alpha=0.4, edgecolors="none", zorder=1)
+    
+    # Calcular densidad ponderada por amplitud para el mapa de color (KDE)
+    from scipy.stats import gaussian_kde
+    if len(x) > 5000:
+        idx = np.random.choice(np.arange(len(x)), 5000, replace=False)
+        xy_sample = np.vstack([x[idx], y[idx]])
+        weights_sample = np.abs(y[idx])
+    else:
+        xy_sample = np.vstack([x, y])
+        weights_sample = np.abs(y)
+        
+    try:
+        kde = gaussian_kde(xy_sample, bw_method=0.15, weights=weights_sample)
+        z = kde(np.vstack([x, y]))
+        idx_sort = z.argsort()
+        x_plot, y_plot, z_plot = x[idx_sort], y[idx_sort], z[idx_sort]
+        sizes = 8 + 25 * (np.abs(y_plot) / np.max(np.abs(y_plot)))
+    except Exception:
+        x_plot, y_plot = x, y
+        z_plot = np.ones_like(x)
+        sizes = 12
+        
+    scatter = ax.scatter(x_plot, y_plot, c=z_plot, cmap="turbo", s=sizes, alpha=0.9, edgecolors="none", zorder=2)
+    fig.colorbar(scatter, ax=ax, label="Densidad Relativa")
+    
+    # Onda senoidal de referencia
     t_sin = np.linspace(0, 360, 360)
-    y_sin = np.max(y) * 0.5 * np.sin(np.radians(t_sin)) + (np.max(y) / 2)
-    ax.plot(t_sin, y_sin, color="white", alpha=0.4, linestyle="--", label="Ref. Fase AC (50Hz)")
+    max_amp = np.max(np.abs(y_all)) * 1.05
+    y_sin = max_amp * np.sin(np.radians(t_sin))
+    ax.plot(t_sin, y_sin, color="red", alpha=0.6, linewidth=1.5, label="Ref. AC (50Hz)")
 
     ax.set_xlim(0, 360)
-    ax.set_xlabel("Fase Ciega Reconstruida (Grados)")
-    ax.set_ylabel("Amplitud Peak (V)")
-    ax.set_title("Phase-Resolved Partial Discharge (PRPD) - Blind Sync @ 50Hz")
+    ax.set_xticks(np.arange(0, 361, 45))
+    ax.set_ylim(-max_amp * 1.15, max_amp * 1.15)
     
-    # Add textual note about blind phase reconstruction
-    ax.text(0.5, -0.16, 
-            "Nota: La fase se reconstruye desde el tiempo de llegada del evento asumiendo sincronía a 50 Hz;\nno existe referencia de fase AC medida.", 
-            horizontalalignment='center', verticalalignment='top', 
-            transform=ax.transAxes, fontsize=9, color='gray', style='italic')
-
-    ax.grid(True, linestyle=":", alpha=0.3)
+    ax.set_xlabel("Fase (grados)")
+    ax.set_ylabel("Carga Aparente (V)")
+    ax.set_title("Phase-Resolved Partial Discharge (PRPD)")
+    
+    ax.grid(True, linestyle=":", alpha=0.4)
     
     plt.tight_layout()
     plt.savefig(out_png, dpi=300, bbox_inches="tight")
