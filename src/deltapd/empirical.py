@@ -66,10 +66,13 @@ def validate_empirical_file(
 
     # 3. Aislamiento Temporal (Extracción del Vector $\Delta t$)
     if verbose:
-        print(r"  > Aislando pulsos temporales (Vector \Delta t)...")
-    delta_t = extract_delta_t_vector(
-        denoised, fs, threshold_sigma=3.0, detection_method="scipy_peaks"
-    )
+        print(r"  > Extracting pulse temporal isolation ($\Delta t$)...")
+    try:
+        delta_t = extract_delta_t_vector(
+            denoised, fs, threshold_sigma=3.0, detection_method="scipy_peaks"
+        )
+    except ValueError:
+        delta_t = np.array([], dtype=np.float64)
 
     if len(delta_t) < 3:
         raise ValueError(
@@ -78,10 +81,8 @@ def validate_empirical_file(
 
     # 4. Rastreo Asintótico Ciego
     track_summary = apply_delta_t_tracking(delta_t)
-    kalman_gain = track_summary["Kalman"].gain
-    cusum_alarms = len(
-        getattr(track_summary["CUSUM"].detect(delta_t), "alarm_indices", [])
-    )
+    kalman_gain = track_summary.kalman.steady_state_gain
+    cusum_alarms = track_summary.cusum.n_alarms
 
     # 5. Ablación de Descriptores
     if verbose:

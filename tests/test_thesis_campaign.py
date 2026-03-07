@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from deltapd.campaign.thesis_campaign import run_thesis_campaign
+from thesis_campaign.thesis_campaign import run_thesis_campaign
 from deltapd.loader import load_empirical_signal
 
 

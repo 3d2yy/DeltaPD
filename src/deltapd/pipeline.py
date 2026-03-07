@@ -253,198 +253,6 @@ def run_phase4(
     return complexity, confusion, report
 
 
-from pathlib import Path
-from deltapd.loader import load_empirical_signal
-
-def run_empirical_pipeline(campaign_dir: Path, target_filename: str = "*", fs: float = 5e9, is_envelope: bool = False):
-    """
-    Orquestador de validación física por segmentos temporales.
-    Compensa el dead-time inter-segmento usando Absolute Timestamps.
-    """
-    print(f"\n[ORQUESTADOR] Iniciando campaña física en: {campaign_dir.name}")
-    
-    # Rastrear todos los segmentos (Soporte multi-formato: .csv, .mat, .h5)
-    valid_extensions = {".csv", ".mat", ".h5", ".hdf5"}
-    
-    if target_filename != "*":
-        csv_files = list(campaign_dir.rglob(target_filename))
-    else:
-        # Búsqueda general por extensiones admitidas
-        csv_files = [f for f in campaign_dir.rglob("*") if f.suffix.lower() in valid_extensions]
-        
-    if not csv_files:
-        print(f"Error: No se encontraron archivos métricos compatibles en {campaign_dir}")
-        return None
-        
-    # Fase Preliminar: Cargar t_trig de todos los archivos y ordenarlos cronológicamente
-    segments = []
-    from deltapd.descriptors import detect_pulses_cfar, compute_delta_t, extract_pulse_morphology
-    from deltapd.signal_model import wavelet_denoise
-    
-    import pandas as pd
-    from datetime import datetime
-    
-    print(f"[METADATA] Ingiriendo metadatos termodinámicos de {len(csv_files)} segmentos...")
-    for f_path in csv_files:
-        voltage_array, estimated_fs, t_trig = load_empirical_signal(str(f_path), default_fs=fs, include_trigger_time=True)
-        if len(voltage_array) > 0:
-            segments.append((t_trig, f_path, voltage_array))
-            
-    # Ordenar estrictamente por T_trig absoluto
-    segments.sort(key=lambda x: x[0])
-    global_delta_t = []
-    global_morphology_dfs = []
-    
-    prev_t_trig = None
-    prev_t_end = None
-    
-    for i, (t_trig, f_path, voltage_array) in enumerate(segments):
-        print(f"\n[SEGMENTO {i+1}/{len(segments)}] {f_path.name} (T_trig={t_trig:.2f})")
-        
-        if not is_envelope:
-            print("  -> [FASE 2] Denoisificación Multi-resolución (DWT)...")
-            denoised_signal = wavelet_denoise(voltage_array)
-        else:
-            print("  -> [FASE 2] Skip DWT (Modo Envolvente Detectado)...")
-            denoised_signal = voltage_array
-        
-        print("  -> [FASE 3] Extracción Invariante de Fase (CA-CFAR + ToA)...")
-        pulse_indices = detect_pulses_cfar(denoised_signal, fs=fs)
-        
-        if len(pulse_indices) < 2:
-            print(f"  -> ⚠ Señal atenuada o muerta. Menos de 2 avalanchas. Omitiendo segmento.")
-            continue
-            
-        t_start = pulse_indices[0] / fs
-        t_end = pulse_indices[-1] / fs
-        local_delta_t = compute_delta_t(pulse_indices, fs)
-        
-        print("  -> [FASE 5] Extracción de Morfología Termodinámica (Tr, Tf, FWHM)...")
-        df_morph = extract_pulse_morphology(denoised_signal, pulse_indices, fs)
-        
-        if not df_morph.empty:
-            df_morph["segment_id"] = i + 1
-            df_morph["file_name"] = f_path.name
-            df_morph["t_trig_epoch"] = t_trig
-            global_morphology_dfs.append(df_morph)
-        
-        # [FRONTERA MATEMÁTICA]: Compensación del Dead-Time del Hardware
-        if prev_t_trig is not None and prev_t_end is not None and t_trig > 0:
-            dt_frontera = (t_trig + t_start) - (prev_t_trig + prev_t_end)
-            if dt_frontera > 0:
-                print(f"  -> [DEAD-TIME COMPENSADO] dt_frontera = {dt_frontera:.6f} s")
-                global_delta_t.append(dt_frontera)
-            else:
-                print(f"  -> [ADVERTENCIA] dt_frontera negativo ({dt_frontera:.6f} s). Ignorando traslape.")
-                
-        # Inyectar las cascadas de electrones locales
-        global_delta_t.extend(local_delta_t.tolist())
-        print(f"  -> Se extrajeron {len(local_delta_t)} intervalos de avalancha.")
-        
-        # Propagar el estado residual al siguiente vector de Markov
-        prev_t_trig = t_trig
-        prev_t_end = t_end
-
-    delta_t_final = np.array(global_delta_t, dtype=np.float64)
-    eventos = len(delta_t_final)
-    
-    if eventos < 5:
-        print(f"\n⚠ Alerta Global: Solo se detectaron {eventos} avalanchas en la campaña completa. Vector insuficiente.")
-        return None
-
-    print(f"\n[FASE 4] Convergencia Estadística y Topológica sobre {eventos} pulsos...")
-    tracking_result = apply_delta_t_tracking(
-        delta_t_final,
-        fs=fs,
-        cusum_drift=0.5,
-        cusum_threshold=8.0
-    )
-    
-    # ── Diagnostic Statistics (Z-Score Validation) ──────────────────────
-    z = tracking_result.kalman.z_scores
-    z_mean = float(np.mean(z))
-    z_std = float(np.std(z))
-    pct_3sigma = float(np.mean(np.abs(z) > 3) * 100)
-    pct_4sigma = float(np.mean(np.abs(z) > 4) * 100)
-    n_alarms = tracking_result.cusum.n_alarms
-    alarm_rate = n_alarms / eventos * 1000  # alarms per 1000 events
-    
-    print(f"\n[DIAGNOSTICO Z-SCORE]")
-    print(f"  mean(z)     = {z_mean:+.4f}  (ideal: 0.0)")
-    print(f"  std(z)      = {z_std:.4f}   (ideal: 1.0)")
-    print(f"  %|z|>3      = {pct_3sigma:.2f}%  (Gaussiano esperado: 0.27%)")
-    print(f"  %|z|>4      = {pct_4sigma:.2f}%  (Gaussiano esperado: 0.006%)")
-    print(f"  n_alarms    = {n_alarms}")
-    print(f"  alarm_rate  = {alarm_rate:.1f} per 1000 events")
-    
-    print("\n[ESTADO] Exportando matrices de alta densidad a Parquet...")
-    
-    import pandas as pd
-    from datetime import datetime
-    
-    # Asegurar que el directorio exports exista en el ROOT del proyecto
-    # Buscamos la carpeta 'DeltaPD' hacia arriba
-    project_root = Path(__file__).resolve().parent.parent.parent
-    export_dir = project_root / "exports"
-    export_dir.mkdir(exist_ok=True)
-    
-    # Ensamblar el DataFrame
-    df_results = pd.DataFrame({
-        "delta_t": delta_t_final,
-        "kalman_filtered": tracking_result.kalman.filtered,
-        "kalman_z_scores": tracking_result.kalman.z_scores,
-        "cusum_g_plus": tracking_result.cusum.g_plus,
-        "cusum_g_minus": tracking_result.cusum.g_minus,
-        "cusum_alarms": tracking_result.cusum.alarms
-    })
-    
-    timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-    export_path_tracking = export_dir / f"empirical_tracking_{timestamp_str}.parquet"
-    export_path_morphology = export_dir / f"empirical_morphology_{timestamp_str}.parquet"
-    
-    # Persistir Tracking
-    try:
-        df_results.to_parquet(export_path_tracking, index=False)
-        print(f"[ESTADO] Tracking guardado en: {export_path_tracking}")
-    except Exception as e:
-        print(f"⚠ Alerta Global: Falló la exportación a Parquet ({e}). Intentando CSV...")
-        df_results.to_csv(export_path_tracking.with_suffix('.csv'), index=False)
-        
-    # Persistir Morfología
-    if global_morphology_dfs:
-        df_morphology_master = pd.concat(global_morphology_dfs, ignore_index=True)
-        try:
-            df_morphology_master.to_parquet(export_path_morphology, index=False)
-            print(f"[ESTADO] Morfología guardada en: {export_path_morphology}")
-        except Exception as e:
-            print(f"⚠ Alerta Global: Falló la exportación de morfología ({e}).")
-    
-    print("[ESTADO] Pipeline Empírico Asintótico Finalizado - Invulnerabilidad Lograda.")
-    return delta_t_final, tracking_result.kalman, tracking_result.cusum
-
-if __name__ == "__main__":
-    # EL BUCLE DE LA VERDAD DISTRIBUIDA
-    import sys
-    
-    # PRUEBA 7: Integración de archivo MATLAB Envolvente
-    ruta_mat = Path(r"e:\SDFDP\DeltaPD\SignalTestEnvolpe01.mat")
-    if ruta_mat.exists():
-        run_empirical_pipeline(
-            ruta_mat.parent, 
-            target_filename=ruta_mat.name, 
-            fs=5e9, 
-            is_envelope=True
-        )
-    else:
-        # Campaña completa (CSV)
-        ruta_datos_reales = Path(r"e:\Mediciones Benito Tesis") 
-        if ruta_datos_reales.exists():
-            run_empirical_pipeline(ruta_datos_reales, target_filename="CH2.csv")
-        else:
-            print(f"Error: No se encuentra el directorio de la campaña física en {ruta_datos_reales}")
-
-
-
 def main(
     n_samples: int = 4096,
     fs: float = 1e9,
@@ -471,3 +279,171 @@ def main(
         "confusion": confusion,
         "report": report,
     }
+
+
+from pathlib import Path
+
+
+def run_empirical_pipeline(
+    campaign_dir: Path,
+    target_filename: str = "*",
+    fs: float = 5e9,
+    is_envelope: bool = False,
+):
+    """Orchestrator for physical validation over temporal segments.
+
+    Compensates inter-segment dead-time using absolute timestamps
+    when available (e.g. from segmented oscilloscope captures).
+
+    Parameters
+    ----------
+    campaign_dir : Path
+        Directory containing waveform files.
+    target_filename : str
+        Glob pattern for file selection. Use '*' for all supported files.
+    fs : float
+        Default sampling frequency in Hz.
+    is_envelope : bool
+        If True, skip wavelet denoising (signal is already an envelope).
+
+    Returns
+    -------
+    tuple or None
+        (delta_t_final, kalman_result, cusum_result) or None if insufficient data.
+    """
+    print(f"\n[PIPELINE] Starting empirical campaign in: {campaign_dir.name}")
+
+    valid_extensions = {".csv", ".mat", ".h5", ".hdf5"}
+
+    if target_filename != "*":
+        csv_files = list(campaign_dir.rglob(target_filename))
+    else:
+        csv_files = [f for f in campaign_dir.rglob("*")
+                     if f.suffix.lower() in valid_extensions]
+
+    if not csv_files:
+        print(f"Error: No compatible files found in {campaign_dir}")
+        return None
+
+    from deltapd.descriptors import detect_pulses_cfar, compute_delta_t, extract_pulse_morphology
+    from deltapd.signal_model import wavelet_denoise
+    import pandas as pd
+    from datetime import datetime
+
+    segments = []
+    print(f"[METADATA] Ingesting {len(csv_files)} segments...")
+    for f_path in csv_files:
+        voltage_array, estimated_fs, t_trig = load_empirical_signal(
+            str(f_path), default_fs=fs, include_trigger_time=True,
+        )
+        if len(voltage_array) > 0:
+            segments.append((t_trig, f_path, voltage_array))
+
+    segments.sort(key=lambda x: x[0])
+    global_delta_t = []
+    global_morphology_dfs = []
+
+    prev_t_trig = None
+    prev_t_end = None
+
+    for i, (t_trig, f_path, voltage_array) in enumerate(segments):
+        print(f"\n[SEGMENT {i+1}/{len(segments)}] {f_path.name} (T_trig={t_trig:.2f})")
+
+        if not is_envelope:
+            denoised_signal = wavelet_denoise(voltage_array)
+        else:
+            denoised_signal = voltage_array
+
+        pulse_indices = detect_pulses_cfar(denoised_signal, fs=fs)
+
+        if len(pulse_indices) < 2:
+            print(f"  Fewer than 2 pulses detected. Skipping segment.")
+            continue
+
+        t_start = pulse_indices[0] / fs
+        t_end = pulse_indices[-1] / fs
+        local_delta_t = compute_delta_t(pulse_indices, fs)
+
+        df_morph = extract_pulse_morphology(denoised_signal, pulse_indices, fs)
+
+        if not df_morph.empty:
+            df_morph["segment_id"] = i + 1
+            df_morph["file_name"] = f_path.name
+            df_morph["t_trig_epoch"] = t_trig
+            global_morphology_dfs.append(df_morph)
+
+        # Dead-time compensation between segments
+        if prev_t_trig is not None and prev_t_end is not None and t_trig > 0:
+            dt_boundary = (t_trig + t_start) - (prev_t_trig + prev_t_end)
+            if dt_boundary > 0:
+                print(f"  Dead-time compensated: dt_boundary = {dt_boundary:.6f} s")
+                global_delta_t.append(dt_boundary)
+
+        global_delta_t.extend(local_delta_t.tolist())
+        print(f"  Extracted {len(local_delta_t)} inter-pulse intervals.")
+
+        prev_t_trig = t_trig
+        prev_t_end = t_end
+
+    delta_t_final = np.array(global_delta_t, dtype=np.float64)
+    n_events = len(delta_t_final)
+
+    if n_events < 5:
+        print(f"\nInsufficient events ({n_events}) for tracking analysis.")
+        return None
+
+    print(f"\n[TRACKING] Running Kalman/EWMA/CUSUM on {n_events} intervals...")
+    tracking_result = apply_delta_t_tracking(
+        delta_t_final, fs=fs, cusum_drift=0.5, cusum_threshold=8.0,
+    )
+
+    # Diagnostic statistics (Z-score validation)
+    z = tracking_result.kalman.z_scores
+    z_mean = float(np.mean(z))
+    z_std = float(np.std(z))
+    pct_3sigma = float(np.mean(np.abs(z) > 3) * 100)
+    n_alarms = tracking_result.cusum.n_alarms
+
+    print(f"\n[Z-SCORE DIAGNOSTICS]")
+    print(f"  mean(z)  = {z_mean:+.4f}  (ideal: 0.0)")
+    print(f"  std(z)   = {z_std:.4f}   (ideal: 1.0)")
+    print(f"  %|z|>3   = {pct_3sigma:.2f}%  (Gaussian expected: 0.27%)")
+    print(f"  n_alarms = {n_alarms}")
+
+    # Export results
+    import pandas as pd
+    from datetime import datetime
+
+    project_root = Path(__file__).resolve().parent.parent.parent
+    export_dir = project_root / "exports"
+    export_dir.mkdir(exist_ok=True)
+
+    df_results = pd.DataFrame({
+        "delta_t": delta_t_final,
+        "kalman_filtered": tracking_result.kalman.filtered,
+        "kalman_z_scores": tracking_result.kalman.z_scores,
+        "cusum_g_plus": tracking_result.cusum.g_plus,
+        "cusum_g_minus": tracking_result.cusum.g_minus,
+        "cusum_alarms": tracking_result.cusum.alarms,
+    })
+
+    timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    export_path_tracking = export_dir / f"empirical_tracking_{timestamp_str}.parquet"
+    export_path_morphology = export_dir / f"empirical_morphology_{timestamp_str}.parquet"
+
+    try:
+        df_results.to_parquet(export_path_tracking, index=False)
+        print(f"[EXPORT] Tracking saved: {export_path_tracking}")
+    except Exception as e:
+        df_results.to_csv(export_path_tracking.with_suffix('.csv'), index=False)
+
+    if global_morphology_dfs:
+        df_morphology_master = pd.concat(global_morphology_dfs, ignore_index=True)
+        try:
+            df_morphology_master.to_parquet(export_path_morphology, index=False)
+            print(f"[EXPORT] Morphology saved: {export_path_morphology}")
+        except Exception:
+            pass
+
+    print("[PIPELINE] Empirical pipeline completed.")
+    return delta_t_final, tracking_result.kalman, tracking_result.cusum

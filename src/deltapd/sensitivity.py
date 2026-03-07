@@ -66,17 +66,21 @@ def run_snr_sensitivity(
             )
             rmse_val = compute_rmse(clean, denoised)
 
-            # 3. Aislamiento Delta T
-            delta_t, _ = extract_delta_t_vector(
-                denoised, fs, threshold_sigma=3.0, method="scipy_peaks"
-            )
+            # 3. Delta-t extraction
+            try:
+                delta_t = extract_delta_t_vector(
+                    denoised, fs, threshold_sigma=3.0,
+                    detection_method="scipy_peaks",
+                )
+            except ValueError:
+                delta_t = np.array([], dtype=np.float64)
+
             n_pulses = len(delta_t) + 1
 
-            # Prevenir fallback fatal si el SNR es catastrófico y aniquiló los picos
             if len(delta_t) < 3:
                 f1_list.append(0.0)
-                fpr_list.append(1.0)  # Penalidad máxima
-                lat_list.append(n_samples)  # Penalidad máxima
+                fpr_list.append(1.0)
+                lat_list.append(n_samples)
                 npulses_list.append(n_pulses)
                 rmse_list.append(rmse_val)
                 continue
@@ -84,14 +88,15 @@ def run_snr_sensitivity(
             # 4. Tracking
             tracking_res = apply_delta_t_tracking(delta_t)
 
-            # 5. Extracción de Métricas de Validacion (Simulación de Anomaly Injection - mitad array)
+            # 5. Anomaly injection (shift at midpoint)
             dt_anom = np.concatenate([delta_t, delta_t * 0.5])
             gt_change = len(delta_t)
 
-            cusum_detector = tracking_res["CUSUM"]
-            # Re-proteger CUSUM track con la anomalia inyectada
+            # Re-run CUSUM on the concatenated anomalous vector
+            from deltapd.trackers import CUSUMDetector as _CUSUMDetector
+            cusum_detector = _CUSUMDetector(threshold=5.0, drift=0.5)
             det_anom = cusum_detector.detect(dt_anom)
-            alarms = getattr(det_anom, "alarm_indices", [])
+            alarms = det_anom.alarm_indices
 
             tps = [idx for idx in alarms if idx >= gt_change]
             fps = [idx for idx in alarms if idx < gt_change]
