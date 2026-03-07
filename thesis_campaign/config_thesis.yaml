@@ -1,0 +1,62 @@
+# config_thesis.yaml
+
+campaign_name: "Tesis_CUSUM_Comparativa_Antenas"
+base_dir: "E:/Carpeta definitiva de Tesis/programas"
+output_dir: "outputs/tesis_final"
+
+analysis_params:
+  default_fs: 1.0e9
+  noise_window_ns: 200
+  bands_ghz:
+    - [0.0, 0.5]
+    - [0.5, 1.5]
+    - [1.5, 2.4]
+  detection_k_values: [3.0, 5.0, 7.0]
+  delta_t_threshold_sigma: 3.0
+  delta_t_detection_method: "cfar"
+  denoise:
+    enabled: true
+    wavelet: "db4"
+    threshold_mode: "soft"
+    threshold_rule: "universal"
+
+datasets:
+  P1:
+    folder: "Prueba 1 - Internas"
+    mode: "benchmark"
+    channel_map:
+      CH2: "AVA_gemela"
+      CH3: "AVA_propuesta"
+      CH4: "Bioinspirada"
+  P2:
+    folder: "Prueba 2 - Superficiales"
+    mode: "benchmark"
+    channel_map:
+      CH2: "AVA_gemela"
+      CH3: "AVA_propuesta"
+      CH4: "Deepace"
+  P3:
+    folder: "Prueba 3 - Ensayo de Fuentes Múltiples Simultáneas"
+    mode: "benchmark"
+    channel_map:
+      CH2: "Deepace"
+      CH3: "AVA_propuesta"
+      CH4: "Bioinspirada"
+  P1_Gemelas:
+    folder: "Prueba 1 - Internas (Gemelas)"
+    mode: "gemelas"
+    channel_map:
+      CH2: "AVA_gemela"
+      CH3: "AVA_propuesta"
+  P2_Gemelas:
+    folder: "Prueba 2 - Superficiales (Gemelas)"
+    mode: "gemelas"
+    channel_map:
+      CH2: "AVA_gemela"
+      CH3: "AVA_propuesta"
+  P3_Gemelas:
+    folder: "Prueba 3 - Ensayo de Fuentes Múltiples Simultáneas (Gemelas)"
+    mode: "gemelas"
+    channel_map:
+      CH2: "AVA_gemela"
+      CH3: "AVA_propuesta"

@@ -1,0 +1,47 @@
+campaign_name: "Capitulo_V_Material"
+base_dir: "E:/Carpeta definitiva de Tesis/programas"
+output_dir: "outputs/material_state_outputs"
+
+dataset:
+  folder: "Prueba 1 - Internas"
+  channel: "CH3"
+  antenna_name: "AVA_propuesta"
+
+preprocess:
+  preserve_amplitude: true
+  centering: true
+  normalization: none
+  wavelet_denoise: true
+
+detection:
+  k_sigma: 5.0
+  refractory_ns: 20
+  noise_window_ns: 40
+
+analysis:
+  export_sensitivity_report: true
+  stage_aware: true
+  # stage_boundaries_s puede ser "auto" o una lista explícita [t1, t2] para definir las etapas por tiempo físico
+  stage_boundaries_s: [120.0, 600.0]
+  max_valid_dt_s: 1.0
+  rolling_window_events: 50
+  ewma_alpha: 0.2
+  cusum_k: 0.5
+  cusum_h: 5.0
+  kalman_q: 1e-4
+  kalman_r: 1.0
+  bands_ghz:
+    - [0.0, 0.5]
+    - [0.5, 1.5]
+    - [1.5, 2.4]
+
+plots:
+  show_raw_with_detections: true
+  show_delta_t_series: true
+  show_delta_t_hist: true
+  show_rate_series: true
+  show_rolling_stats: true
+  show_ewma_cusum: true
+  # Nuevas analíticas Q1
+  show_advanced_stats: true
+  show_blind_prpd: true

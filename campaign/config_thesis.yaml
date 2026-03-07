@@ -1,0 +1,57 @@
+campaign_name: "Tesis_AVA_UHF_PD"
+base_dir: "./data"
+output_dir: "outputs/thesis"
+
+analysis_params:
+  preserve_amplitude: true
+  default_fs: 1.0e9
+  noise_window_ns: 40
+  delta_t_threshold_sigma: 3.0
+  delta_t_detection_method: "cfar"
+  detection_k_values: [3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 6.5, 7.0]
+  bands_ghz:
+    - [0.0, 0.5]
+    - [0.5, 1.5]
+    - [1.5, 2.4]
+  denoise:
+    enabled: false
+    wavelet: "db4"
+    threshold_mode: "soft"
+    threshold_rule: "universal"
+
+datasets:
+  P1:
+    folder: "Prueba 1 - Internas"
+    label: "Prueba 1 - Internas"
+    mode: "benchmark"
+    channel_map:
+      CH2: "Deepace"
+      CH3: "AVA_propuesta"
+      CH4: "Bioinspirada"
+
+  P2:
+    folder: "Prueba 2 - Superficiales"
+    label: "Prueba 2 - Superficiales"
+    mode: "benchmark"
+    channel_map:
+      CH2: "Deepace"
+      CH3: "AVA_propuesta"
+      CH4: "Bioinspirada"
+
+  P3:
+    folder: "Prueba 3 - Ensayo de Fuentes Múltiples Simultáneas"
+    label: "Prueba 3 - Ensayo de Fuentes Múltiples Simultáneas"
+    mode: "benchmark"
+    channel_map:
+      CH2: "Deepace"
+      CH3: "AVA_propuesta"
+      CH4: "Bioinspirada"
+
+  G1:
+    folder: "Prueba 1 - Gemelas"
+    label: "Prueba 1 - Gemelas"
+    mode: "gemelas"
+    channel_map:
+      CH2: "AVA_gemela"
+      CH3: "AVA_propuesta"
+      CH4: "Bioinspirada"
