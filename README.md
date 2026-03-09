@@ -1,13 +1,13 @@
 # DeltaPD
 
-DeltaPD es un framework de analisis de descargas parciales UHF orientado a tesis e investigacion aplicada. Su nucleo combina:
+DeltaPD es un framework de analisis de descargas parciales UHF orientado a investigacion aplicada. Su nucleo combina:
 
 - dinamica temporal entre pulsos (`delta t`),
 - reconstruccion ciega de fase y PRPD sin referencia externa,
 - estudios por adquisicion (`state` / `alarm`),
 - y comparativos entre tipos de descarga en `CH3`.
 
-El canal canonico de tesis es `CH3`. `CH2` se usa como apoyo en carpetas gemelas y `CH4` queda fuera del eje principal.
+El canal canonico de tesis es `CH3`. `CH2` .
 
 ![Blind PRPD P3](docs/images/blind_prpd_p3_material.png)
 
@@ -142,7 +142,7 @@ pytest -q
 
 ## Configuracion canonica actual
 
-En `CH3`, el baseline operativo actual se apoya en:
+El baseline operativo actual se apoya en:
 
 - `k_sigma = 5.0`
 - `wavelet_denoise = true`
