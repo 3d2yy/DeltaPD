@@ -51,11 +51,37 @@ def test_load_workbench_data_discovers_state_alarm_and_comparative_outputs():
                 }
             ]
         ).to_csv(state_root / "state_alarm_batch_summary.csv", index=False)
+        pd.DataFrame(
+            [
+                {
+                    "dataset_key": "P1",
+                    "max_abs_local_freq_offset_hz": 0.12,
+                    "local_regime_transition_entropy": 0.34,
+                    "local_regime_mean_run_length": 1.5,
+                }
+            ]
+        ).to_csv(state_root / "transition_overlap_case_summary.csv", index=False)
         (state_root / "state_alarm_batch_summary.md").write_text("# batch\n", encoding="utf-8")
         p1_material = state_root / "P1" / "material"
         p1_study = state_root / "P1" / "study"
         p1_material.mkdir(parents=True)
         p1_study.mkdir(parents=True)
+        (p1_material / "run_manifest.json").write_text(
+            json.dumps(
+                {
+                    "blind_prpd": {"selected_method": "coherence"},
+                    "ingestion_audit": {
+                        "file_type": "csv",
+                        "loader_mode": "generic_csv",
+                        "delimiter": ";",
+                        "fs_hz": 1.0e9,
+                        "fs_source": "time_axis",
+                        "signal_column_label": "CH3",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
         (p1_material / "08_blind_prpd_50hz.png").write_bytes(b"png")
         (p1_study / "study_report.md").write_text("# report\n", encoding="utf-8")
         (p1_study / "report.pdf").write_bytes(b"pdf")
@@ -69,6 +95,60 @@ def test_load_workbench_data_discovers_state_alarm_and_comparative_outputs():
         )
         (comparative_root / "comparative_ch3_descriptor_report.pdf").write_bytes(b"pdf")
         (comparative_root / "comparative_window_counts.png").write_bytes(b"png")
+
+        sensitivity_root = outputs_root / "semaphore_sensitivity_ch3"
+        sensitivity_root.mkdir(parents=True)
+        (sensitivity_root / "semaphore_sensitivity_manifest.json").write_text(
+            json.dumps({"channel": "CH3", "scenario_count": 2}),
+            encoding="utf-8",
+        )
+        (sensitivity_root / "semaphore_sensitivity_summary.md").write_text("# sensitivity\n", encoding="utf-8")
+        pd.DataFrame(
+            [
+                {
+                    "scenario_key": "baseline",
+                    "scenario_label": "Baseline",
+                    "scenario_order": 1,
+                    "mean_risk": 0.44,
+                    "mean_confidence": 0.88,
+                    "gray_count": 0,
+                }
+            ]
+        ).to_csv(sensitivity_root / "semaphore_sensitivity_scenario_summary.csv", index=False)
+        pd.DataFrame(
+            [
+                {
+                    "dataset_key": "P1",
+                    "modal_band": "yellow",
+                    "band_stability": 0.9,
+                    "gray_count": 0,
+                }
+            ]
+        ).to_csv(sensitivity_root / "semaphore_sensitivity_case_summary.csv", index=False)
+        (sensitivity_root / "semaphore_sensitivity_repeatability.json").write_text(
+            json.dumps({"all_bands_match": True, "max_abs_risk_delta": 0.0}),
+            encoding="utf-8",
+        )
+        (sensitivity_root / "semaphore_sensitivity_heatmap.png").write_bytes(b"png")
+
+        jobs_root = outputs_root / "workbench_jobs" / "job_001"
+        jobs_root.mkdir(parents=True)
+        (jobs_root / "job_manifest.json").write_text(
+            json.dumps(
+                {
+                    "job_id": "job_001",
+                    "mode": "semaphore_sensitivity",
+                    "status": "succeeded",
+                    "created_at": "2026-03-09T10:30:00",
+                    "progress_current": 12,
+                    "progress_total": 12,
+                    "message": "Finished.",
+                    "output_root": str(sensitivity_root),
+                    "stable_output_root": str(sensitivity_root),
+                }
+            ),
+            encoding="utf-8",
+        )
 
         vna_root = outputs_root / "workbench_vna"
         vna_root.mkdir(parents=True)
@@ -95,15 +175,25 @@ def test_load_workbench_data_discovers_state_alarm_and_comparative_outputs():
             repo_root=repo_root,
             state_alarm_root=state_root,
             comparative_root=comparative_root,
+            sensitivity_root=sensitivity_root,
             vna_root=vna_root,
             pd_base_dir=repo_root,
         )
 
+        assert data["active_channel"] == "CH3"
+        assert "CH3" in data["available_channels"]
         assert data["state_alarm"]["available"] is True
         assert data["state_alarm"]["case_keys"] == ["P1"]
+        assert data["state_alarm"]["summary_rows"][0]["max_abs_local_freq_offset_hz"] == 0.12
         assert data["state_alarm"]["cases"]["P1"]["pdf_url"].endswith("/outputs/state_alarm_ch3/P1/study/report.pdf")
+        assert data["state_alarm"]["cases"]["P1"]["ingestion_audit"]["loader_mode"] == "generic_csv"
         assert data["comparative"]["available"] is True
         assert len(data["comparative"]["images"]) == 1
+        assert data["sensitivity"]["available"] is True
+        assert data["sensitivity"]["repeatability"]["all_bands_match"] is True
+        assert len(data["sensitivity"]["images"]) == 1
+        assert len(data["jobs"]) == 1
+        assert data["jobs"][0]["job_id"] == "job_001"
         assert data["vna"]["available"] is True
         assert len(data["vna"]["images"]) == 1
         assert data["vna"]["pdf_url"].endswith("/outputs/workbench_vna/vna_report.pdf")

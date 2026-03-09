@@ -15,6 +15,7 @@ class EventSeries:
     processed_signal: np.ndarray
     fs_hz: float
     absolute_times_s: np.ndarray | None
+    ingestion_audit: dict[str, object]
     pulse_indices: np.ndarray
     pulse_toa_s: np.ndarray
     pulse_peaks_v: np.ndarray
@@ -100,6 +101,7 @@ def extract_event_series(
         processed_signal=processed_signal,
         fs_hz=float(fs_hz),
         absolute_times_s=None if absolute_times_s is None else np.asarray(absolute_times_s, dtype=np.float64),
+        ingestion_audit={},
         pulse_indices=pulse_indices,
         pulse_toa_s=pulse_toa_s,
         pulse_peaks_v=pulse_peaks_v,
@@ -129,14 +131,15 @@ def load_and_extract_event_series(
         default_fs=float(default_fs),
         preserve_amplitude=bool(preserve_amplitude),
         include_absolute_times=bool(include_absolute_times),
+        include_diagnostics=True,
     )
-    if len(load_result) == 3:
-        raw_signal, fs_hz, absolute_times_s = load_result
+    if include_absolute_times:
+        raw_signal, fs_hz, absolute_times_s, ingestion_audit = load_result
     else:
-        raw_signal, fs_hz = load_result
+        raw_signal, fs_hz, ingestion_audit = load_result
         absolute_times_s = None
 
-    return extract_event_series(
+    extracted = extract_event_series(
         raw_signal,
         fs_hz=float(fs_hz),
         absolute_times_s=absolute_times_s,
@@ -149,3 +152,5 @@ def load_and_extract_event_series(
         threshold_mode=str(threshold_mode),
         threshold_rule=str(threshold_rule),
     )
+    extracted.ingestion_audit.update(dict(ingestion_audit or {}))
+    return extracted

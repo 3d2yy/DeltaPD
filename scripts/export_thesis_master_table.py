@@ -502,7 +502,7 @@ def main() -> int:
         "--blind-prpd-method",
         type=str,
         default="auto",
-        help="Blind PRPD calibration method: coherence, harmonic_power, epoch_folding, gregory_loredo, phase_distance_correlation, auto.",
+    help="Blind PRPD calibration method: coherence, harmonic_power, epoch_folding, h_test, pdm, gregory_loredo, phase_distance_correlation, auto.",
     )
     parser.add_argument(
         "--blind-prpd-harmonics",

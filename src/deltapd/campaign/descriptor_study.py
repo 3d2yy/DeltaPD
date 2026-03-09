@@ -148,6 +148,58 @@ def _phase_cluster_metrics(phases_deg: np.ndarray, peaks_v: np.ndarray) -> dict[
     return metrics
 
 
+def _semicycle_phase_statistics(phases_deg: np.ndarray) -> dict[str, float]:
+    metrics = {
+        "phase_pos_min_deg": float("nan"),
+        "phase_pos_q25_deg": float("nan"),
+        "phase_pos_median_deg": float("nan"),
+        "phase_pos_q75_deg": float("nan"),
+        "phase_pos_max_deg": float("nan"),
+        "phase_pos_mean_deg": float("nan"),
+        "phase_pos_skewness": float("nan"),
+        "phase_pos_kurtosis": float("nan"),
+        "phase_pos_count": float("nan"),
+        "phase_neg_min_deg": float("nan"),
+        "phase_neg_q25_deg": float("nan"),
+        "phase_neg_median_deg": float("nan"),
+        "phase_neg_q75_deg": float("nan"),
+        "phase_neg_max_deg": float("nan"),
+        "phase_neg_mean_deg": float("nan"),
+        "phase_neg_skewness": float("nan"),
+        "phase_neg_kurtosis": float("nan"),
+        "phase_neg_count": float("nan"),
+    }
+    if len(phases_deg) < 8:
+        return metrics
+
+    phases = np.mod(np.asarray(phases_deg, dtype=np.float64), 360.0)
+    semicycles = {
+        "pos": phases[phases <= 180.0],
+        "neg": phases[phases > 180.0],
+    }
+    for prefix, values in semicycles.items():
+        if len(values) < 4:
+            continue
+        metrics[f"phase_{prefix}_min_deg"] = float(np.min(values))
+        metrics[f"phase_{prefix}_q25_deg"] = float(np.percentile(values, 25))
+        metrics[f"phase_{prefix}_median_deg"] = float(np.median(values))
+        metrics[f"phase_{prefix}_q75_deg"] = float(np.percentile(values, 75))
+        metrics[f"phase_{prefix}_max_deg"] = float(np.max(values))
+        metrics[f"phase_{prefix}_mean_deg"] = float(np.mean(values))
+        metrics[f"phase_{prefix}_count"] = float(len(values))
+        metrics[f"phase_{prefix}_skewness"] = (
+            float(stats.skew(values, bias=False))
+            if len(values) >= 8 and np.unique(values).size > 2
+            else float("nan")
+        )
+        metrics[f"phase_{prefix}_kurtosis"] = (
+            float(stats.kurtosis(values, fisher=True, bias=False))
+            if len(values) >= 8 and np.unique(values).size > 3
+            else float("nan")
+        )
+    return metrics
+
+
 def compute_window_descriptors(
     df_window: pd.DataFrame,
     *,
@@ -187,6 +239,24 @@ def compute_window_descriptors(
         "weibull_beta": float("nan"),
         "burstiness": float("nan"),
         "fano_factor": float("nan"),
+        "phase_pos_min_deg": float("nan"),
+        "phase_pos_q25_deg": float("nan"),
+        "phase_pos_median_deg": float("nan"),
+        "phase_pos_q75_deg": float("nan"),
+        "phase_pos_max_deg": float("nan"),
+        "phase_pos_mean_deg": float("nan"),
+        "phase_pos_skewness": float("nan"),
+        "phase_pos_kurtosis": float("nan"),
+        "phase_pos_count": float("nan"),
+        "phase_neg_min_deg": float("nan"),
+        "phase_neg_q25_deg": float("nan"),
+        "phase_neg_median_deg": float("nan"),
+        "phase_neg_q75_deg": float("nan"),
+        "phase_neg_max_deg": float("nan"),
+        "phase_neg_mean_deg": float("nan"),
+        "phase_neg_skewness": float("nan"),
+        "phase_neg_kurtosis": float("nan"),
+        "phase_neg_count": float("nan"),
     }
 
     if len(dt_valid) > 0:
@@ -226,6 +296,7 @@ def compute_window_descriptors(
             peaks_v=peaks[phase_peak_mask],
         )
     )
+    descriptors.update(_semicycle_phase_statistics(phases[phase_peak_mask]))
     return descriptors
 
 
@@ -1124,6 +1195,8 @@ def _plot_blind_transition_map(
         "coherence": "#2d6a8a",
         "harmonic_power": "#c26d2d",
         "epoch_folding": "#6d597a",
+        "h_test": "#3a86ff",
+        "pdm": "#ff9f1c",
         "gregory_loredo": "#5d8f52",
         "phase_distance_correlation": "#9b2226",
     }

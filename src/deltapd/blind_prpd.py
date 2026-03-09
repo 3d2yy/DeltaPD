@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -224,6 +225,74 @@ def _epoch_folding_value(
     return best_score
 
 
+def _h_test_value(
+    freq_hz: float,
+    toa_s: np.ndarray,
+    weights: np.ndarray,
+    *,
+    n_harmonics: int,
+) -> float:
+    base = np.exp(1j * 4.0 * np.pi * float(freq_hz) * toa_s)
+    harmonic = base.copy()
+    denom = max(float(np.sum(weights)), 1e-30)
+    cumulative = 0.0
+    best_score = 0.0
+    for harmonic_idx in range(1, max(int(n_harmonics), 1) + 1):
+        resultant = np.abs(np.sum(weights * harmonic)) / denom
+        cumulative += float(resultant * resultant)
+        score = float(2.0 * denom * cumulative - 4.0 * (harmonic_idx - 1))
+        if score > best_score:
+            best_score = score
+        harmonic *= base
+    return float(max(best_score, 0.0))
+
+
+def _pdm_value(
+    freq_hz: float,
+    toa_s: np.ndarray,
+    weights: np.ndarray,
+    *,
+    n_bins: int,
+    n_shifts: int = 8,
+) -> float:
+    n_bins = max(int(n_bins), 8)
+    phases_unit = np.mod(np.asarray(toa_s, dtype=np.float64) * 2.0 * float(freq_hz), 1.0)
+    if len(phases_unit) < n_bins:
+        return 0.0
+
+    global_var = float(np.var(phases_unit, ddof=1))
+    if global_var <= 1e-30:
+        return 0.0
+
+    best_theta = float("inf")
+    bin_width = 1.0 / float(n_bins)
+    for shift_idx in range(max(int(n_shifts), 1)):
+        shift = shift_idx * bin_width / max(int(n_shifts), 1)
+        shifted = np.mod(phases_unit + shift, 1.0)
+        bin_idx = np.minimum((shifted * n_bins).astype(int), n_bins - 1)
+        theta_num = 0.0
+        populated_bins = 0
+        for current_bin in range(n_bins):
+            mask = bin_idx == current_bin
+            if not np.any(mask):
+                continue
+            bin_values = shifted[mask]
+            populated_bins += 1
+            if len(bin_values) < 2:
+                continue
+            theta_num += float((len(bin_values) - 1) * np.var(bin_values, ddof=1))
+        effective_dof = len(phases_unit) - populated_bins
+        if effective_dof <= 0:
+            continue
+        theta = theta_num / max(float(effective_dof) * global_var, 1e-30)
+        if theta < best_theta:
+            best_theta = theta
+
+    if not np.isfinite(best_theta):
+        return 0.0
+    return float(max(1.0 - best_theta, 0.0))
+
+
 def _phase_distance_correlation_value(
     freq_hz: float,
     toa_s: np.ndarray,
@@ -355,6 +424,48 @@ def _harmonic_power_curve(
     return scores
 
 
+def _h_test_curve(
+    freq_grid: np.ndarray,
+    toa_s: np.ndarray,
+    weights: np.ndarray,
+    *,
+    n_harmonics: int,
+    chunk_size: int = 256,
+) -> np.ndarray:
+    scores = np.empty(len(freq_grid), dtype=np.float64)
+    denom = max(float(np.sum(weights)), 1e-30)
+    toa_row = toa_s[None, :]
+    weights_row = weights[None, :]
+    n_harmonics = max(int(n_harmonics), 1)
+    for start in range(0, len(freq_grid), chunk_size):
+        stop = min(start + chunk_size, len(freq_grid))
+        freq_block = freq_grid[start:stop, None]
+        base = np.exp(1j * 4.0 * np.pi * freq_block * toa_row)
+        harmonic = base.copy()
+        cumulative = np.zeros(stop - start, dtype=np.float64)
+        best_scores = np.zeros(stop - start, dtype=np.float64)
+        for harmonic_idx in range(1, n_harmonics + 1):
+            resultant = np.abs(np.sum(harmonic * weights_row, axis=1)) / denom
+            cumulative += resultant * resultant
+            best_scores = np.maximum(best_scores, 2.0 * denom * cumulative - 4.0 * (harmonic_idx - 1))
+            harmonic *= base
+        scores[start:stop] = np.maximum(best_scores, 0.0)
+    return scores
+
+
+def _pdm_curve(
+    freq_grid: np.ndarray,
+    toa_s: np.ndarray,
+    weights: np.ndarray,
+    *,
+    n_bins: int,
+) -> np.ndarray:
+    return np.array(
+        [_pdm_value(float(freq), toa_s, weights, n_bins=n_bins) for freq in freq_grid],
+        dtype=np.float64,
+    )
+
+
 def _phase_distance_correlation_curve(
     freq_grid: np.ndarray,
     toa_s: np.ndarray,
@@ -398,6 +509,10 @@ def _score_value(
         return _harmonic_power_value(freq_hz, toa_s, weights, n_harmonics=n_harmonics)
     if method == "epoch_folding":
         return _epoch_folding_value(freq_hz, toa_s, weights, n_bins=24)
+    if method == "h_test":
+        return _h_test_value(freq_hz, toa_s, weights, n_harmonics=n_harmonics)
+    if method == "pdm":
+        return _pdm_value(freq_hz, toa_s, weights, n_bins=max(12, 2 * max(int(n_harmonics), 1) + 4))
     if method == "gregory_loredo":
         return _gregory_loredo_value(freq_hz, toa_s)
     if method == "phase_distance_correlation":
@@ -426,6 +541,21 @@ def _score_curve(
         )
     if method == "epoch_folding":
         return _epoch_folding_curve(freq_grid, toa_s, weights, n_bins=24)
+    if method == "h_test":
+        return _h_test_curve(
+            freq_grid,
+            toa_s,
+            weights,
+            n_harmonics=n_harmonics,
+            chunk_size=chunk_size,
+        )
+    if method == "pdm":
+        return _pdm_curve(
+            freq_grid,
+            toa_s,
+            weights,
+            n_bins=max(12, 2 * max(int(n_harmonics), 1) + 4),
+        )
     if method == "gregory_loredo":
         return np.array([_gregory_loredo_value(float(freq), toa_s) for freq in freq_grid], dtype=np.float64)
     if method == "phase_distance_correlation":
@@ -567,6 +697,27 @@ def _common_axial_support_metrics(
     )
 
 
+def _bootstrap_frequency_worker(payload: dict[str, Any]) -> tuple[float, str]:
+    boot_result = calibrate_grid_frequency_details(
+        np.asarray(payload["toa_s"], dtype=np.float64),
+        base_freq=float(payload["base_freq"]),
+        search_width=float(payload["search_width"]),
+        coarse_steps=int(payload["coarse_steps"]),
+        refine_half_width=float(payload["refine_half_width"]),
+        max_events=int(payload["max_events"]),
+        peak_weights=(
+            None
+            if payload["peak_weights"] is None
+            else np.asarray(payload["peak_weights"], dtype=np.float64)
+        ),
+        robust_refine=bool(payload["robust_refine"]),
+        method=str(payload["method"]),
+        n_harmonics=int(payload["n_harmonics"]),
+        bootstrap_iterations=0,
+    )
+    return float(boot_result.freq_hz), str(boot_result.selected_method)
+
+
 def _bootstrap_stability_metrics(
     toa_s: np.ndarray,
     *,
@@ -583,6 +734,7 @@ def _bootstrap_stability_metrics(
     sample_fraction: float,
     seed: int | None,
     selected_method: str,
+    max_workers: int | None = None,
 ) -> dict[str, Any]:
     iterations = max(int(iterations), 0)
     if iterations <= 0:
@@ -617,31 +769,41 @@ def _bootstrap_stability_metrics(
     effective_fraction = min(max(float(sample_fraction), 0.5), 1.0)
     sample_size = min(n_events, max(20, int(round(n_events * effective_fraction))))
     rng = np.random.default_rng(seed)
-    freq_samples: list[float] = []
-    method_counts: dict[str, int] = {}
     bootstrap_coarse_steps = min(int(coarse_steps), 401)
     bootstrap_max_events = min(int(max_events), 4000)
-
+    payloads: list[dict[str, Any]] = []
     for _ in range(iterations):
         idx = np.sort(rng.integers(0, n_events, size=sample_size))
-        boot_toa = toa[idx]
-        boot_weights = weights[idx] if weights is not None else None
-        boot_result = calibrate_grid_frequency_details(
-            boot_toa,
-            base_freq=base_freq,
-            search_width=search_width,
-            coarse_steps=bootstrap_coarse_steps,
-            refine_half_width=refine_half_width,
-            max_events=bootstrap_max_events,
-            peak_weights=boot_weights,
-            robust_refine=robust_refine,
-            method=method,
-            n_harmonics=n_harmonics,
-            bootstrap_iterations=0,
+        payloads.append(
+            {
+                "toa_s": np.asarray(toa[idx], dtype=np.float64),
+                "peak_weights": None if weights is None else np.asarray(weights[idx], dtype=np.float64),
+                "base_freq": float(base_freq),
+                "search_width": float(search_width),
+                "coarse_steps": int(bootstrap_coarse_steps),
+                "refine_half_width": float(refine_half_width),
+                "max_events": int(bootstrap_max_events),
+                "robust_refine": bool(robust_refine),
+                "method": str(method),
+                "n_harmonics": int(n_harmonics),
+            }
         )
-        freq_samples.append(float(boot_result.freq_hz))
-        boot_method = str(boot_result.selected_method)
-        method_counts[boot_method] = method_counts.get(boot_method, 0) + 1
+
+    if max_workers is None:
+        effective_workers = 1
+    else:
+        effective_workers = max(int(max_workers), 1)
+
+    if effective_workers == 1 or iterations == 1:
+        results = [_bootstrap_frequency_worker(payload) for payload in payloads]
+    else:
+        with ProcessPoolExecutor(max_workers=effective_workers) as executor:
+            results = list(executor.map(_bootstrap_frequency_worker, payloads))
+
+    freq_samples = [float(freq_hz) for freq_hz, _ in results]
+    method_counts: dict[str, int] = {}
+    for _, boot_method in results:
+        method_counts[str(boot_method)] = method_counts.get(str(boot_method), 0) + 1
 
     freq_arr = np.asarray(freq_samples, dtype=np.float64)
     ci_low_hz = float(np.quantile(freq_arr, 0.025))
@@ -1038,6 +1200,7 @@ def calibrate_grid_frequency_details(
     bootstrap_iterations: int = 0,
     bootstrap_sample_fraction: float = 0.75,
     bootstrap_seed: int | None = None,
+    bootstrap_max_workers: int | None = None,
     local_window_size_events: int = 0,
     local_window_step_events: int = 0,
     local_min_events_per_window: int = 128,
@@ -1103,6 +1266,7 @@ def calibrate_grid_frequency_details(
             sample_fraction=bootstrap_sample_fraction,
             seed=bootstrap_seed,
             selected_method=winner.method,
+            max_workers=bootstrap_max_workers,
         )
         local_metrics = _contiguous_window_stability_metrics(
             toa,
@@ -1191,6 +1355,7 @@ def calibrate_grid_frequency_details(
         sample_fraction=bootstrap_sample_fraction,
         seed=bootstrap_seed,
         selected_method=candidate.method,
+        max_workers=bootstrap_max_workers,
     )
     local_metrics = _contiguous_window_stability_metrics(
         toa,
@@ -1267,6 +1432,7 @@ def calibrate_grid_frequency(
     bootstrap_iterations: int = 0,
     bootstrap_sample_fraction: float = 0.75,
     bootstrap_seed: int | None = None,
+    bootstrap_max_workers: int | None = None,
     local_window_size_events: int = 0,
     local_window_step_events: int = 0,
     local_min_events_per_window: int = 128,
@@ -1291,6 +1457,7 @@ def calibrate_grid_frequency(
         bootstrap_iterations=bootstrap_iterations,
         bootstrap_sample_fraction=bootstrap_sample_fraction,
         bootstrap_seed=bootstrap_seed,
+        bootstrap_max_workers=bootstrap_max_workers,
         local_window_size_events=local_window_size_events,
         local_window_step_events=local_window_step_events,
         local_min_events_per_window=local_min_events_per_window,
@@ -1317,6 +1484,7 @@ def reconstruct_blind_prpd(
     bootstrap_iterations: int = 0,
     bootstrap_sample_fraction: float = 0.75,
     bootstrap_seed: int | None = None,
+    bootstrap_max_workers: int | None = None,
     local_window_size_events: int = 0,
     local_window_step_events: int = 0,
     local_min_events_per_window: int = 128,
@@ -1367,6 +1535,7 @@ def reconstruct_blind_prpd(
             bootstrap_iterations=bootstrap_iterations,
             bootstrap_sample_fraction=bootstrap_sample_fraction,
             bootstrap_seed=bootstrap_seed,
+            bootstrap_max_workers=bootstrap_max_workers,
             local_window_size_events=local_window_size_events,
             local_window_step_events=local_window_step_events,
             local_min_events_per_window=local_min_events_per_window,
@@ -1454,6 +1623,7 @@ def compare_frequency_estimators(
     bootstrap_iterations: int = 0,
     bootstrap_sample_fraction: float = 0.75,
     bootstrap_seed: int | None = None,
+    bootstrap_max_workers: int | None = None,
     local_window_size_events: int = 0,
     local_window_step_events: int = 0,
     local_min_events_per_window: int = 128,
@@ -1474,6 +1644,7 @@ def compare_frequency_estimators(
             bootstrap_iterations=bootstrap_iterations,
             bootstrap_sample_fraction=bootstrap_sample_fraction,
             bootstrap_seed=bootstrap_seed,
+            bootstrap_max_workers=bootstrap_max_workers,
             local_window_size_events=local_window_size_events,
             local_window_step_events=local_window_step_events,
             local_min_events_per_window=local_min_events_per_window,

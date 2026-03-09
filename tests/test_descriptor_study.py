@@ -62,6 +62,15 @@ def test_build_feature_windows_generates_descriptor_matrix():
     assert not df_windows.empty
     for feature in PRIMARY_DESCRIPTOR_BANK:
         assert feature in df_windows.columns
+    for feature in [
+        "phase_neg_mean_deg",
+        "phase_neg_q25_deg",
+        "phase_neg_count",
+        "phase_pos_mean_deg",
+        "phase_pos_q75_deg",
+        "phase_pos_count",
+    ]:
+        assert feature in df_windows.columns
     assert "stage" in df_windows.columns
 
 

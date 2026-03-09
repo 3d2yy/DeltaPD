@@ -404,6 +404,7 @@ def run_material_state(config_path: str | Path):
         "timestamp": datetime.now().isoformat(),
         "config_used": cfg,
         "source_file": str(file_path),
+        "ingestion_audit": dict(extracted.ingestion_audit),
         "total_events": len(df_delta),
         "valid_events": int((~df_delta["is_outlier"]).sum()),
         "outlier_events": int(df_delta["is_outlier"].sum()),

@@ -98,12 +98,15 @@ def test_compare_frequency_estimators_reports_multiple_methods():
         toa,
         base_freq=50.0,
         peak_weights=peaks,
-        methods=("coherence", "harmonic_power", "epoch_folding"),
+        methods=("coherence", "harmonic_power", "epoch_folding", "h_test", "pdm"),
         n_harmonics=3,
     )
 
-    assert [row["method"] for row in results] == ["coherence", "harmonic_power", "epoch_folding"]
-    assert all(abs(float(row["freq_hz"]) - f_true) < 2e-3 for row in results)
+    assert [row["method"] for row in results] == ["coherence", "harmonic_power", "epoch_folding", "h_test", "pdm"]
+    strong_methods = {"coherence", "harmonic_power", "epoch_folding", "h_test"}
+    for row in results:
+        tolerance = 2e-3 if str(row["method"]) in strong_methods else 1e-2
+        assert abs(float(row["freq_hz"]) - f_true) < tolerance
     assert all("sharpness" in row for row in results)
     assert all("selected_method" in row for row in results)
     assert all("common_axial_confidence" in row for row in results)
@@ -167,6 +170,49 @@ def test_bootstrap_stability_metrics_are_exposed_for_auto():
     assert np.isfinite(details.bootstrap_ci_width_hz)
     assert 0.0 <= details.bootstrap_method_agreement <= 1.0
     assert isinstance(details.bootstrap_selected_method_counts, dict)
+
+
+def test_bootstrap_parallel_matches_serial_for_same_seed():
+    rng = np.random.default_rng(49)
+    f_true = 50.021
+    cycles = np.arange(700, dtype=np.float64)
+    phase_choices = rng.choice([26.0, 206.0], size=len(cycles))
+    jitter_s = rng.normal(0.0, 2.0e-6, size=len(cycles))
+    toa = np.sort(cycles / f_true + (phase_choices / 360.0) / f_true + jitter_s)
+    peaks = 0.75 + 0.25 * rng.random(len(toa))
+
+    serial = calibrate_grid_frequency_details(
+        toa,
+        base_freq=50.0,
+        search_width=0.35,
+        peak_weights=peaks,
+        method="auto",
+        n_harmonics=4,
+        bootstrap_iterations=6,
+        bootstrap_sample_fraction=0.8,
+        bootstrap_seed=21,
+        bootstrap_max_workers=1,
+    )
+    parallel = calibrate_grid_frequency_details(
+        toa,
+        base_freq=50.0,
+        search_width=0.35,
+        peak_weights=peaks,
+        method="auto",
+        n_harmonics=4,
+        bootstrap_iterations=6,
+        bootstrap_sample_fraction=0.8,
+        bootstrap_seed=21,
+        bootstrap_max_workers=2,
+    )
+
+    assert serial.bootstrap_iterations == parallel.bootstrap_iterations
+    assert serial.bootstrap_selected_method_counts == parallel.bootstrap_selected_method_counts
+    assert serial.bootstrap_method_agreement == parallel.bootstrap_method_agreement
+    np.testing.assert_allclose(serial.bootstrap_freq_mean_hz, parallel.bootstrap_freq_mean_hz)
+    np.testing.assert_allclose(serial.bootstrap_freq_std_hz, parallel.bootstrap_freq_std_hz)
+    np.testing.assert_allclose(serial.bootstrap_ci_low_hz, parallel.bootstrap_ci_low_hz)
+    np.testing.assert_allclose(serial.bootstrap_ci_high_hz, parallel.bootstrap_ci_high_hz)
 
 
 def test_reconstruct_blind_prpd_matches_direct_calibration_details():
@@ -290,6 +336,48 @@ def test_epoch_folding_recovers_frequency_for_clean_axial_case():
     )
 
     assert abs(f_est - f_true) < 2e-3
+
+
+def test_h_test_recovers_frequency_for_clean_axial_case():
+    rng = np.random.default_rng(56)
+    f_true = 49.964
+    cycles = np.arange(1400, dtype=np.float64)
+    phase_choices = rng.choice([34.0, 214.0], size=len(cycles))
+    jitter_s = rng.normal(0.0, 2.0e-6, size=len(cycles))
+    toa = np.sort(cycles / f_true + (phase_choices / 360.0) / f_true + jitter_s)
+    peaks = 0.7 + 0.4 * rng.random(len(toa))
+
+    f_est = calibrate_grid_frequency(
+        toa,
+        base_freq=50.0,
+        search_width=0.5,
+        peak_weights=peaks,
+        method="h_test",
+        n_harmonics=4,
+    )
+
+    assert abs(f_est - f_true) < 2e-3
+
+
+def test_pdm_recovers_frequency_for_clean_axial_case():
+    rng = np.random.default_rng(57)
+    f_true = 50.018
+    cycles = np.arange(1400, dtype=np.float64)
+    phase_choices = rng.choice([38.0, 218.0], size=len(cycles))
+    jitter_s = rng.normal(0.0, 2.0e-6, size=len(cycles))
+    toa = np.sort(cycles / f_true + (phase_choices / 360.0) / f_true + jitter_s)
+    peaks = 0.7 + 0.4 * rng.random(len(toa))
+
+    f_est = calibrate_grid_frequency(
+        toa,
+        base_freq=50.0,
+        search_width=0.5,
+        peak_weights=peaks,
+        method="pdm",
+        n_harmonics=4,
+    )
+
+    assert abs(f_est - f_true) < 1e-2
 
 
 def test_gregory_loredo_recovers_frequency_for_clean_event_folding_case():

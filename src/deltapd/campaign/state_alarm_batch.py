@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import pywt
 import yaml
+from matplotlib.lines import Line2D
 
 from deltapd.campaign.descriptor_study import run_descriptor_study
 
@@ -48,6 +51,18 @@ DEFAULT_MATERIAL_DEFAULTS = {
         "blind_prpd": {
             "calibration_method": "auto",
             "n_harmonics": 4,
+            "search_width_hz": 0.25,
+            "coarse_steps": 4001,
+            "refine_half_width_hz": 0.02,
+            "max_events": 20000,
+            "robust_refine": True,
+            "bootstrap_iterations": 6,
+            "bootstrap_sample_fraction": 0.75,
+            "bootstrap_seed": 42,
+            "local_window_size_events": 256,
+            "local_window_step_events": 128,
+            "local_min_events_per_window": 128,
+            "local_min_window_count": 3,
         },
     },
     "plots": {
@@ -120,6 +135,16 @@ DEFAULT_STUDY_DEFAULTS = {
     },
 }
 
+TRANSITION_METHOD_ORDER = [
+    "coherence",
+    "harmonic_power",
+    "epoch_folding",
+    "h_test",
+    "pdm",
+    "gregory_loredo",
+    "phase_distance_correlation",
+]
+
 
 def _repo_root_from_config(config_path: str | Path) -> Path:
     resolved = Path(config_path).resolve()
@@ -169,15 +194,18 @@ def _case_material_config(
     channel: str,
     output_dir: Path,
 ) -> dict[str, Any]:
+    dataset_cfg = {
+        "folder": case["folder"],
+        "channel": channel,
+        "antenna_name": material_defaults.get("antenna_name", "unknown"),
+    }
+    if case.get("file_path"):
+        dataset_cfg["file_path"] = str(case["file_path"])
     return {
         "campaign_name": f"{case['dataset_key']}_{channel}_Material_Study",
         "base_dir": base_dir,
         "output_dir": output_dir.as_posix(),
-        "dataset": {
-            "folder": case["folder"],
-            "channel": channel,
-            "antenna_name": material_defaults.get("antenna_name", "unknown"),
-        },
+        "dataset": dataset_cfg,
         "preprocess": material_defaults.get("preprocess", {}),
         "detection": material_defaults.get("detection", {}),
         "analysis": material_defaults.get("analysis", {}),
@@ -401,8 +429,8 @@ def _write_batch_summary_markdown(
                 "",
                 "Counts below use distinct matched blind-PRPD local windows. `Ranked candidates` is shown separately because nearby top candidates can collapse onto the same local regime.",
                 "",
-                "| Dataset | Local windows | Ranked candidates | Unique local methods | Dominant local method | Max abs offset (Hz) | Mean abs offset (Hz) | Mean local conf. | State score | Alarm score |",
-                "| --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: |",
+                "| Dataset | Local windows | Ranked candidates | Unique local methods | Method entropy | Switch rate | Dominant local method | Max abs offset (Hz) | Mean abs offset (Hz) | Mean local conf. | State score | Alarm score |",
+                "| --- | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: |",
             ]
         )
         ordered = transition_case_summary_df.sort_values("dataset_key").reset_index(drop=True)
@@ -415,6 +443,8 @@ def _write_batch_summary_markdown(
                         str(int(row.get("n_transition_windows", 0) or 0)),
                         str(int(row.get("n_ranked_transition_candidates", 0) or 0)),
                         str(int(row.get("n_unique_local_methods", 0) or 0)),
+                        f"{_safe_float(row.get('transition_method_entropy')):.4f}",
+                        f"{_safe_float(row.get('local_method_switch_rate')):.4f}",
                         str(row.get("dominant_local_method", "")),
                         f"{_safe_float(row.get('max_abs_local_freq_offset_hz')):.6f}",
                         f"{_safe_float(row.get('mean_abs_local_freq_offset_hz')):.6f}",
@@ -449,15 +479,231 @@ def _write_batch_summary_markdown(
                 )
                 + "."
             )
+        entropy_top = ordered.sort_values("transition_method_entropy", ascending=False)[
+            ["dataset_key", "transition_method_entropy"]
+        ].head(3)
+        switch_top = ordered.sort_values("local_method_switch_rate", ascending=False)[
+            ["dataset_key", "local_method_switch_rate"]
+        ].head(3)
+        lines.extend(
+            [
+                "- Highest transition-method entropy: "
+                + ", ".join(
+                    f"{row['dataset_key']}={_safe_float(row['transition_method_entropy']):.4f}"
+                    for _, row in entropy_top.iterrows()
+                )
+                + ".",
+                "- Highest local method switch rate: "
+                + ", ".join(
+                    f"{row['dataset_key']}={_safe_float(row['local_method_switch_rate']):.4f}"
+                    for _, row in switch_top.iterrows()
+                )
+                + ".",
+            ]
+        )
+        if {"tfa_wavelet_entropy_mean", "tfa_wavelet_dominant_band_unique_count"}.issubset(ordered.columns):
+            tfa_entropy_top = ordered.sort_values("tfa_wavelet_entropy_mean", ascending=False)[
+                ["dataset_key", "tfa_wavelet_entropy_mean"]
+            ].head(3)
+            tfa_band_top = ordered.sort_values("tfa_wavelet_dominant_band_unique_count", ascending=False)[
+                ["dataset_key", "tfa_wavelet_dominant_band_unique_count"]
+            ].head(3)
+            lines.extend(
+                [
+                    "- Highest local wavelet entropy mean: "
+                    + ", ".join(
+                        f"{row['dataset_key']}={_safe_float(row['tfa_wavelet_entropy_mean']):.4f}"
+                        for _, row in tfa_entropy_top.iterrows()
+                    )
+                    + ".",
+                    "- Highest local wavelet-band diversity: "
+                    + ", ".join(
+                        f"{row['dataset_key']}={int(row['tfa_wavelet_dominant_band_unique_count'])}"
+                        for _, row in tfa_band_top.iterrows()
+                    )
+                    + ".",
+                ]
+            )
+        if {"tfa_wavelet_detail_entropy_mean", "tfa_wavelet_detail_dominant_band_unique_count"}.issubset(ordered.columns):
+            tfa_detail_entropy_top = ordered.sort_values("tfa_wavelet_detail_entropy_mean", ascending=False)[
+                ["dataset_key", "tfa_wavelet_detail_entropy_mean"]
+            ].head(3)
+            tfa_detail_band_top = ordered.sort_values("tfa_wavelet_detail_dominant_band_unique_count", ascending=False)[
+                ["dataset_key", "tfa_wavelet_detail_dominant_band_unique_count"]
+            ].head(3)
+            lines.extend(
+                [
+                    "- Highest local wavelet detail entropy mean: "
+                    + ", ".join(
+                        f"{row['dataset_key']}={_safe_float(row['tfa_wavelet_detail_entropy_mean']):.4f}"
+                        for _, row in tfa_detail_entropy_top.iterrows()
+                    )
+                    + ".",
+                    "- Highest local wavelet detail-band diversity: "
+                    + ", ".join(
+                        f"{row['dataset_key']}={int(row['tfa_wavelet_detail_dominant_band_unique_count'])}"
+                        for _, row in tfa_detail_band_top.iterrows()
+                    )
+                    + ".",
+                ]
+            )
+        if {
+            "local_regime_transition_entropy",
+            "local_regime_mean_run_length",
+            "local_offset_sign_switch_rate",
+        }.issubset(ordered.columns):
+            regime_entropy_top = ordered.sort_values("local_regime_transition_entropy", ascending=False)[
+                ["dataset_key", "local_regime_transition_entropy"]
+            ].head(3)
+            run_length_top = ordered.sort_values("local_regime_mean_run_length", ascending=False)[
+                ["dataset_key", "local_regime_mean_run_length"]
+            ].head(3)
+            sign_switch_top = ordered.sort_values("local_offset_sign_switch_rate", ascending=False)[
+                ["dataset_key", "local_offset_sign_switch_rate"]
+            ].head(3)
+            lines.extend(
+                [
+                    "- Highest local regime-transition entropy: "
+                    + ", ".join(
+                        f"{row['dataset_key']}={_safe_float(row['local_regime_transition_entropy']):.4f}"
+                        for _, row in regime_entropy_top.iterrows()
+                    )
+                    + ".",
+                    "- Longest local mean regime run length: "
+                    + ", ".join(
+                        f"{row['dataset_key']}={_safe_float(row['local_regime_mean_run_length']):.4f}"
+                        for _, row in run_length_top.iterrows()
+                    )
+                    + ".",
+                    "- Highest local offset-sign switch rate: "
+                    + ", ".join(
+                        f"{row['dataset_key']}={_safe_float(row['local_offset_sign_switch_rate']):.4f}"
+                        for _, row in sign_switch_top.iterrows()
+                    )
+                    + ".",
+                ]
+            )
+        if {
+            "bocpd_max_change_prob",
+            "bocpd_run_length_mean",
+            "bocpd_surprise_score",
+        }.issubset(ordered.columns):
+            bocpd_change_top = ordered.sort_values("bocpd_max_change_prob", ascending=False)[
+                ["dataset_key", "bocpd_max_change_prob"]
+            ].head(3)
+            bocpd_run_top = ordered.sort_values("bocpd_run_length_mean", ascending=True)[
+                ["dataset_key", "bocpd_run_length_mean"]
+            ].head(3)
+            bocpd_surprise_top = ordered.sort_values("bocpd_surprise_score", ascending=False)[
+                ["dataset_key", "bocpd_surprise_score"]
+            ].head(3)
+            lines.extend(
+                [
+                    "- Highest BOCPD max change probability: "
+                    + ", ".join(
+                        f"{row['dataset_key']}={_safe_float(row['bocpd_max_change_prob']):.4f}"
+                        for _, row in bocpd_change_top.iterrows()
+                    )
+                    + ".",
+                    "- Shortest BOCPD mean expected run length: "
+                    + ", ".join(
+                        f"{row['dataset_key']}={_safe_float(row['bocpd_run_length_mean']):.4f}"
+                        for _, row in bocpd_run_top.iterrows()
+                    )
+                    + ".",
+                    "- Highest BOCPD surprise score: "
+                    + ", ".join(
+                        f"{row['dataset_key']}={_safe_float(row['bocpd_surprise_score']):.4f}"
+                        for _, row in bocpd_surprise_top.iterrows()
+                    )
+                    + ".",
+                ]
+            )
+        if {
+            "hmm_high_state_share",
+            "hmm_state_switch_rate",
+            "hmm_state_mean_run_length",
+        }.issubset(ordered.columns):
+            hmm_share_top = ordered.sort_values("hmm_high_state_share", ascending=False)[
+                ["dataset_key", "hmm_high_state_share"]
+            ].head(3)
+            hmm_switch_top = ordered.sort_values("hmm_state_switch_rate", ascending=False)[
+                ["dataset_key", "hmm_state_switch_rate"]
+            ].head(3)
+            hmm_run_top = ordered.sort_values("hmm_state_mean_run_length", ascending=True)[
+                ["dataset_key", "hmm_state_mean_run_length"]
+            ].head(3)
+            lines.extend(
+                [
+                    "- Highest HMM high-state share: "
+                    + ", ".join(
+                        f"{row['dataset_key']}={_safe_float(row['hmm_high_state_share']):.4f}"
+                        for _, row in hmm_share_top.iterrows()
+                    )
+                    + ".",
+                    "- Highest HMM switch rate: "
+                    + ", ".join(
+                        f"{row['dataset_key']}={_safe_float(row['hmm_state_switch_rate']):.4f}"
+                        for _, row in hmm_switch_top.iterrows()
+                    )
+                    + ".",
+                    "- Shortest HMM mean run length: "
+                    + ", ".join(
+                        f"{row['dataset_key']}={_safe_float(row['hmm_state_mean_run_length']):.4f}"
+                        for _, row in hmm_run_top.iterrows()
+                    )
+                    + ".",
+                ]
+            )
+        if {
+            "semi_markov_high_state_share",
+            "semi_markov_state_switch_rate",
+            "semi_markov_state_mean_run_length",
+        }.issubset(ordered.columns):
+            semi_markov_share_top = ordered.sort_values("semi_markov_high_state_share", ascending=False)[
+                ["dataset_key", "semi_markov_high_state_share"]
+            ].head(3)
+            semi_markov_switch_top = ordered.sort_values("semi_markov_state_switch_rate", ascending=False)[
+                ["dataset_key", "semi_markov_state_switch_rate"]
+            ].head(3)
+            semi_markov_run_top = ordered.sort_values("semi_markov_state_mean_run_length", ascending=True)[
+                ["dataset_key", "semi_markov_state_mean_run_length"]
+            ].head(3)
+            lines.extend(
+                [
+                    "- Highest semi-Markov high-state share: "
+                    + ", ".join(
+                        f"{row['dataset_key']}={_safe_float(row['semi_markov_high_state_share']):.4f}"
+                        for _, row in semi_markov_share_top.iterrows()
+                    )
+                    + ".",
+                    "- Highest semi-Markov switch rate: "
+                    + ", ".join(
+                        f"{row['dataset_key']}={_safe_float(row['semi_markov_state_switch_rate']):.4f}"
+                        for _, row in semi_markov_switch_top.iterrows()
+                    )
+                    + ".",
+                    "- Shortest semi-Markov mean run length: "
+                    + ", ".join(
+                        f"{row['dataset_key']}={_safe_float(row['semi_markov_state_mean_run_length']):.4f}"
+                        for _, row in semi_markov_run_top.iterrows()
+                    )
+                    + ".",
+                ]
+            )
         offset_df = ordered.copy()
         rho_state = _safe_spearman(offset_df["max_abs_local_freq_offset_hz"], offset_df["state_primary_score"])
         rho_alarm = _safe_spearman(offset_df["max_abs_local_freq_offset_hz"], offset_df["alarm_primary_score"])
         rho_mix_alarm = _safe_spearman(offset_df["n_unique_local_methods"], offset_df["alarm_primary_score"])
+        rho_entropy_alarm = _safe_spearman(offset_df["transition_method_entropy"], offset_df["alarm_primary_score"])
+        rho_switch_alarm = _safe_spearman(offset_df["local_method_switch_rate"], offset_df["alarm_primary_score"])
         lines.extend(
             [
                 f"- Exploratory Spearman rho: max |offset| vs state score = {rho_state:.3f}.",
                 f"- Exploratory Spearman rho: max |offset| vs alarm score = {rho_alarm:.3f}.",
                 f"- Exploratory Spearman rho: local-method diversity vs alarm score = {rho_mix_alarm:.3f}.",
+                f"- Exploratory Spearman rho: transition-method entropy vs alarm score = {rho_entropy_alarm:.3f}.",
+                f"- Exploratory Spearman rho: local switch rate vs alarm score = {rho_switch_alarm:.3f}.",
             ]
         )
     lines.extend(
@@ -564,6 +810,769 @@ def _dominant_transition_method(method_counts: dict[str, int]) -> str:
     return winners[0] if len(winners) == 1 else f"tie: {', '.join(winners)}"
 
 
+def _normalized_transition_entropy(
+    method_counts: dict[str, int],
+    *,
+    known_methods: list[str],
+) -> tuple[float, float]:
+    counts = np.asarray([float(method_counts.get(method, 0)) for method in known_methods], dtype=np.float64)
+    total = float(np.sum(counts))
+    if total <= 0:
+        return float("nan"), float("nan")
+    probs = counts / total
+    positive = probs > 0
+    entropy = -np.sum(np.where(positive, probs * np.log2(np.clip(probs, 1e-12, None)), 0.0))
+    denom = np.log2(max(len(known_methods), 2))
+    normalized_entropy = float(entropy / denom) if denom > 0 else float("nan")
+    dominant_share = float(np.max(probs))
+    return normalized_entropy, dominant_share
+
+
+def _transition_switch_metrics(df_case: pd.DataFrame) -> tuple[int, float]:
+    if df_case.empty or "local_selected_method" not in df_case.columns:
+        return 0, 0.0
+
+    work = df_case.copy()
+    sort_cols: list[str] = []
+    if "local_window_index" in work.columns:
+        work["local_window_index"] = pd.to_numeric(work["local_window_index"], errors="coerce")
+        sort_cols.append("local_window_index")
+    if "candidate_rank" in work.columns:
+        work["candidate_rank"] = pd.to_numeric(work["candidate_rank"], errors="coerce")
+        sort_cols.append("candidate_rank")
+    if sort_cols:
+        work = work.sort_values(sort_cols, kind="mergesort")
+
+    methods = (
+        work["local_selected_method"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .replace("", pd.NA)
+        .dropna()
+        .tolist()
+    )
+    if len(methods) < 2:
+        return 0, 0.0
+    switch_count = int(sum(curr != prev for prev, curr in zip(methods, methods[1:])))
+    return switch_count, float(switch_count / max(len(methods) - 1, 1))
+
+
+def _order_transition_sequence_df(df_case: pd.DataFrame) -> pd.DataFrame:
+    if df_case.empty:
+        return df_case.copy()
+
+    work = df_case.copy()
+    sort_cols: list[str] = []
+    if "local_window_index" in work.columns:
+        work["local_window_index"] = pd.to_numeric(work["local_window_index"], errors="coerce")
+        sort_cols.append("local_window_index")
+    if "candidate_rank" in work.columns:
+        work["candidate_rank"] = pd.to_numeric(work["candidate_rank"], errors="coerce")
+        sort_cols.append("candidate_rank")
+    if sort_cols:
+        work = work.sort_values(sort_cols, kind="mergesort")
+    return work.reset_index(drop=True)
+
+
+def _offset_sign_label(value: Any) -> str:
+    number = _safe_float(value)
+    if not np.isfinite(number):
+        return ""
+    if number > 1e-12:
+        return "positive"
+    if number < -1e-12:
+        return "negative"
+    return "zero"
+
+
+def _robust_standardize(values: np.ndarray) -> np.ndarray:
+    arr = np.asarray(values, dtype=np.float64)
+    out = np.zeros(len(arr), dtype=np.float64)
+    finite = np.isfinite(arr)
+    if not np.any(finite):
+        return out
+    valid = arr[finite]
+    center = float(np.median(valid))
+    mad = float(np.median(np.abs(valid - center)))
+    scale = mad * 1.4826
+    if not np.isfinite(scale) or scale <= 1e-12:
+        scale = float(np.std(valid, ddof=0))
+    if not np.isfinite(scale) or scale <= 1e-12:
+        out[finite] = 0.0
+        return out
+    out[finite] = (valid - center) / scale
+    return out
+
+
+def _method_code_series(methods: list[str]) -> np.ndarray:
+    lookup = {method: idx for idx, method in enumerate(TRANSITION_METHOD_ORDER)}
+    fallback = len(lookup)
+    return np.asarray([float(lookup.get(str(method).strip(), fallback)) for method in methods], dtype=np.float64)
+
+
+def _build_bocpd_signal(
+    offsets_hz: np.ndarray,
+    confidences: np.ndarray,
+    methods: list[str],
+) -> tuple[np.ndarray, np.ndarray]:
+    offset_component = _robust_standardize(offsets_hz)
+    confidence_component = _robust_standardize(-np.asarray(confidences, dtype=np.float64))
+    method_codes = _robust_standardize(_method_code_series(methods))
+    method_change = np.zeros(len(methods), dtype=np.float64)
+    if len(methods) >= 2:
+        method_change[1:] = np.asarray(
+            [1.0 if methods[idx] != methods[idx - 1] else 0.0 for idx in range(1, len(methods))],
+            dtype=np.float64,
+        )
+    signal = 0.45 * offset_component + 0.30 * confidence_component + 0.15 * method_codes + 0.10 * method_change
+    return signal.astype(np.float64), method_change
+
+
+def _bocpd_gaussian_change_profile(
+    signal: np.ndarray,
+    *,
+    hazard: float = 0.20,
+    prior_mean: float = 0.0,
+    prior_kappa: float = 1.0,
+    obs_scale: float = 1.0,
+) -> dict[str, np.ndarray]:
+    x = np.asarray(signal, dtype=np.float64)
+    if len(x) == 0:
+        empty = np.array([], dtype=np.float64)
+        return {
+            "change_prob": empty,
+            "expected_run_length": empty,
+            "log_surprise": empty,
+        }
+
+    hazard = float(np.clip(hazard, 1e-4, 0.999))
+    obs_var = max(float(obs_scale) ** 2, 1e-6)
+    run_probs = np.array([1.0], dtype=np.float64)
+    mu_params = np.array([float(prior_mean)], dtype=np.float64)
+    kappa_params = np.array([max(float(prior_kappa), 1e-6)], dtype=np.float64)
+    change_probs: list[float] = []
+    expected_runs: list[float] = []
+    log_surprise: list[float] = []
+
+    for value in x:
+        pred_var = obs_var * (1.0 + 1.0 / np.maximum(kappa_params, 1e-12))
+        pred_std = np.sqrt(pred_var)
+        z = (value - mu_params) / pred_std
+        pred = np.exp(-0.5 * z * z) / np.maximum(np.sqrt(2.0 * np.pi) * pred_std, 1e-30)
+        pred = np.clip(pred, 1e-300, None)
+        prior_pred_std = np.sqrt(obs_var * (1.0 + 1.0 / max(prior_kappa, 1e-12)))
+        prior_z = (value - prior_mean) / prior_pred_std
+        prior_pred = float(
+            np.exp(-0.5 * prior_z * prior_z)
+            / max(np.sqrt(2.0 * np.pi) * prior_pred_std, 1e-30)
+        )
+        prior_pred = max(prior_pred, 1e-300)
+
+        new_run_probs = np.empty(len(run_probs) + 1, dtype=np.float64)
+        new_run_probs[0] = float(prior_pred * np.sum(run_probs * hazard))
+        new_run_probs[1:] = run_probs * pred * (1.0 - hazard)
+        evidence = float(np.sum(new_run_probs))
+        if not np.isfinite(evidence) or evidence <= 1e-300:
+            new_run_probs = np.zeros_like(new_run_probs)
+            new_run_probs[0] = 1.0
+            evidence = 1e-300
+        else:
+            new_run_probs /= evidence
+
+        change_probs.append(float(new_run_probs[0]))
+        expected_runs.append(float(np.sum(np.arange(len(new_run_probs), dtype=np.float64) * new_run_probs)))
+        log_surprise.append(float(-np.log(evidence)))
+
+        updated_prior_mu = (prior_kappa * prior_mean + value) / (prior_kappa + 1.0)
+        updated_prior_kappa = prior_kappa + 1.0
+        updated_growth_mu = (kappa_params * mu_params + value) / (kappa_params + 1.0)
+        updated_growth_kappa = kappa_params + 1.0
+        mu_params = np.concatenate(([updated_prior_mu], updated_growth_mu))
+        kappa_params = np.concatenate(([updated_prior_kappa], updated_growth_kappa))
+        run_probs = new_run_probs
+
+    return {
+        "change_prob": np.asarray(change_probs, dtype=np.float64),
+        "expected_run_length": np.asarray(expected_runs, dtype=np.float64),
+        "log_surprise": np.asarray(log_surprise, dtype=np.float64),
+    }
+
+
+def _gaussian_hmm_2state_profile(
+    signal: np.ndarray,
+    *,
+    stay_prob: float = 0.84,
+    n_iter: int = 6,
+) -> dict[str, Any]:
+    x = np.asarray(signal, dtype=np.float64)
+    if len(x) == 0:
+        empty = np.array([], dtype=np.float64)
+        return {
+            "state_path": np.array([], dtype=int),
+            "high_state_prob": empty,
+            "posterior": np.empty((0, 2), dtype=np.float64),
+            "means": empty,
+            "variances": empty,
+            "state_entropy": float("nan"),
+        }
+
+    finite = np.isfinite(x)
+    fill_value = float(np.median(x[finite])) if np.any(finite) else 0.0
+    x = np.where(finite, x, fill_value)
+    if len(x) == 1:
+        return {
+            "state_path": np.array([0], dtype=int),
+            "high_state_prob": np.array([0.5], dtype=np.float64),
+            "posterior": np.asarray([[0.5, 0.5]], dtype=np.float64),
+            "means": np.asarray([float(x[0]), float(x[0])], dtype=np.float64),
+            "variances": np.asarray([1.0, 1.0], dtype=np.float64),
+            "state_entropy": 1.0,
+        }
+
+    base_var = max(float(np.var(x, ddof=0)), 1e-3)
+    q25, q75 = np.percentile(x, [25.0, 75.0])
+    if abs(float(q75) - float(q25)) <= 1e-6:
+        spread = max(float(np.sqrt(base_var)), 0.25)
+        q25 = float(np.median(x)) - 0.5 * spread
+        q75 = float(np.median(x)) + 0.5 * spread
+    means = np.asarray([float(q25), float(q75)], dtype=np.float64)
+    variances = np.asarray([base_var, base_var], dtype=np.float64)
+    initial = np.asarray([0.5, 0.5], dtype=np.float64)
+    stay_prob = float(np.clip(stay_prob, 0.55, 0.995))
+    transition = np.asarray(
+        [[stay_prob, 1.0 - stay_prob], [1.0 - stay_prob, stay_prob]],
+        dtype=np.float64,
+    )
+
+    def _emission_matrix(curr_means: np.ndarray, curr_vars: np.ndarray) -> np.ndarray:
+        matrix = np.empty((len(x), 2), dtype=np.float64)
+        for state_idx in range(2):
+            variance = max(float(curr_vars[state_idx]), 1e-6)
+            std = np.sqrt(variance)
+            z = (x - float(curr_means[state_idx])) / std
+            pdf = np.exp(-0.5 * z * z) / max(np.sqrt(2.0 * np.pi) * std, 1e-30)
+            matrix[:, state_idx] = np.clip(pdf, 1e-300, None)
+        return matrix
+
+    posterior = np.full((len(x), 2), 0.5, dtype=np.float64)
+    for _ in range(max(int(n_iter), 1)):
+        emission = _emission_matrix(means, variances)
+        alpha = np.empty_like(emission)
+        scales = np.empty(len(x), dtype=np.float64)
+        alpha[0] = initial * emission[0]
+        scales[0] = max(float(alpha[0].sum()), 1e-300)
+        alpha[0] /= scales[0]
+        for idx in range(1, len(x)):
+            alpha[idx] = emission[idx] * (alpha[idx - 1] @ transition)
+            scales[idx] = max(float(alpha[idx].sum()), 1e-300)
+            alpha[idx] /= scales[idx]
+
+        beta = np.ones_like(emission)
+        for idx in range(len(x) - 2, -1, -1):
+            beta[idx] = transition @ (emission[idx + 1] * beta[idx + 1])
+            beta[idx] /= max(scales[idx + 1], 1e-300)
+
+        posterior = alpha * beta
+        posterior_sum = posterior.sum(axis=1, keepdims=True)
+        posterior = np.divide(
+            posterior,
+            posterior_sum,
+            out=np.full_like(posterior, 0.5),
+            where=posterior_sum > 0,
+        )
+
+        weights = posterior.sum(axis=0)
+        for state_idx in range(2):
+            weight = float(weights[state_idx])
+            if weight <= 1e-6:
+                continue
+            mean_value = float(np.sum(posterior[:, state_idx] * x) / weight)
+            variance_value = float(np.sum(posterior[:, state_idx] * (x - mean_value) ** 2) / weight)
+            means[state_idx] = mean_value
+            variances[state_idx] = max(variance_value, 1e-6)
+
+        order = np.argsort(means)
+        means = means[order]
+        variances = variances[order]
+        posterior = posterior[:, order]
+
+    emission = _emission_matrix(means, variances)
+    log_initial = np.log(np.clip(initial, 1e-12, None))
+    log_transition = np.log(np.clip(transition, 1e-12, None))
+    log_emission = np.log(np.clip(emission, 1e-300, None))
+    delta = np.empty_like(emission)
+    psi = np.zeros((len(x), 2), dtype=int)
+    delta[0] = log_initial + log_emission[0]
+    for idx in range(1, len(x)):
+        for state_idx in range(2):
+            scores = delta[idx - 1] + log_transition[:, state_idx]
+            psi[idx, state_idx] = int(np.argmax(scores))
+            delta[idx, state_idx] = float(np.max(scores)) + log_emission[idx, state_idx]
+
+    state_path = np.zeros(len(x), dtype=int)
+    state_path[-1] = int(np.argmax(delta[-1]))
+    for idx in range(len(x) - 2, -1, -1):
+        state_path[idx] = psi[idx + 1, state_path[idx + 1]]
+
+    occupancy = np.asarray(
+        [
+            float(np.mean(state_path == 0)),
+            float(np.mean(state_path == 1)),
+        ],
+        dtype=np.float64,
+    )
+    positive = occupancy > 0
+    entropy = -np.sum(np.where(positive, occupancy * np.log2(np.clip(occupancy, 1e-12, None)), 0.0))
+    return {
+        "state_path": state_path.astype(int),
+        "high_state_prob": posterior[:, 1].astype(np.float64),
+        "posterior": posterior.astype(np.float64),
+        "means": means.astype(np.float64),
+        "variances": variances.astype(np.float64),
+        "state_entropy": float(entropy / np.log2(2.0)),
+    }
+
+
+def _semi_markov_2state_profile(
+    signal: np.ndarray,
+    *,
+    means: np.ndarray | None = None,
+    variances: np.ndarray | None = None,
+    base_state_path: np.ndarray | None = None,
+) -> dict[str, Any]:
+    x = np.asarray(signal, dtype=np.float64)
+    if len(x) == 0:
+        empty = np.array([], dtype=np.float64)
+        return {
+            "state_path": np.array([], dtype=int),
+            "segment_lengths": np.array([], dtype=int),
+            "segment_states": np.array([], dtype=int),
+            "state_entropy": float("nan"),
+            "duration_surprise_mean": float("nan"),
+            "short_run_count": 0,
+        }
+
+    finite = np.isfinite(x)
+    fill_value = float(np.median(x[finite])) if np.any(finite) else 0.0
+    x = np.where(finite, x, fill_value)
+    if len(x) == 1:
+        return {
+            "state_path": np.array([0], dtype=int),
+            "segment_lengths": np.array([1], dtype=int),
+            "segment_states": np.array([0], dtype=int),
+            "state_entropy": 0.0,
+            "duration_surprise_mean": 0.0,
+            "short_run_count": 1,
+        }
+
+    if means is None or variances is None:
+        hmm_profile = _gaussian_hmm_2state_profile(x)
+        means = np.asarray(hmm_profile["means"], dtype=np.float64)
+        variances = np.asarray(hmm_profile["variances"], dtype=np.float64)
+        if base_state_path is None:
+            base_state_path = np.asarray(hmm_profile["state_path"], dtype=int)
+    else:
+        means = np.asarray(means, dtype=np.float64)
+        variances = np.asarray(variances, dtype=np.float64)
+    if base_state_path is None or len(base_state_path) != len(x):
+        base_state_path = np.asarray((x >= float(np.median(x))).astype(int), dtype=int)
+
+    base_run_lengths: list[int] = []
+    current_state = int(base_state_path[0])
+    current_length = 1
+    for idx in range(1, len(base_state_path)):
+        next_state = int(base_state_path[idx])
+        if next_state == current_state:
+            current_length += 1
+        else:
+            base_run_lengths.append(current_length)
+            current_state = next_state
+            current_length = 1
+    base_run_lengths.append(current_length)
+    duration_mean = float(np.clip(np.mean(base_run_lengths), 2.0, float(len(x))))
+
+    log_emission = np.empty((len(x), 2), dtype=np.float64)
+    for state_idx in range(2):
+        variance = max(float(variances[state_idx]), 1e-6)
+        std = np.sqrt(variance)
+        z = (x - float(means[state_idx])) / std
+        pdf = np.exp(-0.5 * z * z) / max(np.sqrt(2.0 * np.pi) * std, 1e-30)
+        log_emission[:, state_idx] = np.log(np.clip(pdf, 1e-300, None))
+
+    max_duration = len(x)
+    duration_weights = np.empty(max_duration + 1, dtype=np.float64)
+    duration_weights[0] = 0.0
+    for duration in range(1, max_duration + 1):
+        log_weight = duration * math.log(duration_mean) - duration_mean - math.lgamma(duration + 1.0)
+        duration_weights[duration] = math.exp(log_weight)
+    weight_sum = float(np.sum(duration_weights[1:]))
+    if not np.isfinite(weight_sum) or weight_sum <= 1e-300:
+        duration_weights[1:] = 1.0 / float(max_duration)
+    else:
+        duration_weights[1:] /= weight_sum
+    log_duration = np.log(np.clip(duration_weights, 1e-300, None))
+
+    prefix = np.concatenate(
+        [
+            np.zeros((2, 1), dtype=np.float64),
+            np.cumsum(log_emission.T, axis=1),
+        ],
+        axis=1,
+    )
+    dp = np.full((len(x) + 1, 2), -np.inf, dtype=np.float64)
+    prev_end = np.full((len(x) + 1, 2), -1, dtype=int)
+    prev_state = np.full((len(x) + 1, 2), -1, dtype=int)
+    log_initial = math.log(0.5)
+
+    for end in range(1, len(x) + 1):
+        for state_idx in range(2):
+            best_score = -np.inf
+            best_start = -1
+            best_prev_state = -1
+            for duration in range(1, end + 1):
+                start = end - duration
+                segment_score = float(prefix[state_idx, end] - prefix[state_idx, start] + log_duration[duration])
+                if start == 0:
+                    score = log_initial + segment_score
+                    prev_state_idx = -1
+                else:
+                    candidate_prev = 1 - state_idx
+                    prev_score = float(dp[start, candidate_prev])
+                    if not np.isfinite(prev_score):
+                        continue
+                    score = prev_score + segment_score
+                    prev_state_idx = candidate_prev
+                if score > best_score:
+                    best_score = score
+                    best_start = start
+                    best_prev_state = prev_state_idx
+            dp[end, state_idx] = best_score
+            prev_end[end, state_idx] = best_start
+            prev_state[end, state_idx] = best_prev_state
+
+    final_state = int(np.argmax(dp[len(x)]))
+    if not np.isfinite(dp[len(x), final_state]):
+        fallback_state = int(np.argmax(np.sum(log_emission, axis=0)))
+        return {
+            "state_path": np.full(len(x), fallback_state, dtype=int),
+            "segment_lengths": np.array([len(x)], dtype=int),
+            "segment_states": np.array([fallback_state], dtype=int),
+            "state_entropy": 0.0,
+            "duration_surprise_mean": float(-log_duration[len(x)]),
+            "short_run_count": int(len(x) == 1),
+        }
+
+    segments: list[tuple[int, int, int]] = []
+    end = len(x)
+    state_idx = final_state
+    while end > 0 and state_idx >= 0:
+        start = int(prev_end[end, state_idx])
+        if start < 0:
+            break
+        segments.append((start, end, state_idx))
+        prev_state_idx = int(prev_state[end, state_idx])
+        end = start
+        state_idx = prev_state_idx
+    segments.reverse()
+
+    state_path = np.zeros(len(x), dtype=int)
+    segment_lengths: list[int] = []
+    segment_states: list[int] = []
+    duration_surprises: list[float] = []
+    for start, end, state_idx in segments:
+        state_path[start:end] = int(state_idx)
+        duration = int(end - start)
+        segment_lengths.append(duration)
+        segment_states.append(int(state_idx))
+        duration_surprises.append(float(-log_duration[duration]))
+
+    occupancy = np.asarray(
+        [
+            float(np.mean(state_path == 0)),
+            float(np.mean(state_path == 1)),
+        ],
+        dtype=np.float64,
+    )
+    positive = occupancy > 0
+    entropy = -np.sum(np.where(positive, occupancy * np.log2(np.clip(occupancy, 1e-12, None)), 0.0))
+    return {
+        "state_path": state_path.astype(int),
+        "segment_lengths": np.asarray(segment_lengths, dtype=int),
+        "segment_states": np.asarray(segment_states, dtype=int),
+        "state_entropy": float(entropy / np.log2(2.0)),
+        "duration_surprise_mean": float(np.mean(duration_surprises)) if duration_surprises else float("nan"),
+        "short_run_count": int(sum(duration == 1 for duration in segment_lengths)),
+    }
+
+
+def _summarize_transition_local_sequence(
+    primary_overlap_df: pd.DataFrame,
+    summary_df: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    if primary_overlap_df.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    sequence_rows: list[dict[str, Any]] = []
+    edge_rows: list[dict[str, Any]] = []
+    case_rows: list[dict[str, Any]] = []
+    edge_universe = max(len(TRANSITION_METHOD_ORDER) ** 2, 2)
+
+    for dataset_key, df_case in primary_overlap_df.groupby("dataset_key", dropna=False):
+        ordered = _order_transition_sequence_df(df_case)
+        if ordered.empty:
+            continue
+
+        methods = (
+            ordered["local_selected_method"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .tolist()
+        )
+        offsets = pd.to_numeric(
+            ordered.get("local_freq_offset_from_global_hz", pd.Series(index=ordered.index, dtype=float)),
+            errors="coerce",
+        ).to_numpy(dtype=np.float64)
+        confidences = pd.to_numeric(
+            ordered.get("local_common_axial_confidence", pd.Series(index=ordered.index, dtype=float)),
+            errors="coerce",
+        ).to_numpy(dtype=np.float64)
+        sequence_positions = np.arange(1, len(ordered) + 1, dtype=int)
+
+        run_ids: list[int] = []
+        run_id = 0
+        prev_method = ""
+        for method in methods:
+            if method != prev_method:
+                run_id += 1
+                prev_method = method
+            run_ids.append(run_id)
+        run_size_map = pd.Series(run_ids, dtype=int).value_counts().to_dict()
+
+        sign_labels = [_offset_sign_label(value) for value in offsets]
+        bocpd_signal, method_change = _build_bocpd_signal(offsets, confidences, methods)
+        bocpd_profile = _bocpd_gaussian_change_profile(bocpd_signal)
+        change_prob = bocpd_profile["change_prob"]
+        expected_run = bocpd_profile["expected_run_length"]
+        log_surprise = bocpd_profile["log_surprise"]
+        hmm_profile = _gaussian_hmm_2state_profile(bocpd_signal)
+        hmm_state_path = hmm_profile["state_path"]
+        hmm_high_prob = hmm_profile["high_state_prob"]
+        semi_markov_profile = _semi_markov_2state_profile(
+            bocpd_signal,
+            means=np.asarray(hmm_profile["means"], dtype=np.float64),
+            variances=np.asarray(hmm_profile["variances"], dtype=np.float64),
+            base_state_path=hmm_state_path,
+        )
+        semi_markov_state_path = semi_markov_profile["state_path"]
+        sign_switch_count = 0
+        edge_counter: dict[tuple[str, str], int] = {}
+        offset_step_values: list[float] = []
+        confidence_step_values: list[float] = []
+        semi_markov_run_ids: list[int] = []
+        semi_markov_run_id = 0
+        prev_semi_markov_state = -1
+        for state_value in semi_markov_state_path.tolist():
+            state_int = int(state_value)
+            if state_int != prev_semi_markov_state:
+                semi_markov_run_id += 1
+                prev_semi_markov_state = state_int
+            semi_markov_run_ids.append(semi_markov_run_id)
+        semi_markov_run_size_map = pd.Series(semi_markov_run_ids, dtype=int).value_counts().to_dict()
+        for idx, (_, row) in enumerate(ordered.iterrows()):
+            method = methods[idx]
+            sign_label = sign_labels[idx]
+            prev_method = methods[idx - 1] if idx > 0 else ""
+            prev_sign = sign_labels[idx - 1] if idx > 0 else ""
+            candidate_rank_raw = pd.to_numeric(row.get("candidate_rank"), errors="coerce")
+            local_window_raw = pd.to_numeric(row.get("local_window_index"), errors="coerce")
+            offset_step_abs = abs(offsets[idx] - offsets[idx - 1]) if idx > 0 and np.isfinite(offsets[idx - 1]) and np.isfinite(offsets[idx]) else float("nan")
+            confidence_step_abs = (
+                abs(confidences[idx] - confidences[idx - 1])
+                if idx > 0 and np.isfinite(confidences[idx - 1]) and np.isfinite(confidences[idx])
+                else float("nan")
+            )
+            method_changed = bool(idx > 0 and method != prev_method)
+            hmm_changed = bool(idx > 0 and idx < len(hmm_state_path) and hmm_state_path[idx] != hmm_state_path[idx - 1])
+            semi_markov_changed = bool(
+                idx > 0
+                and idx < len(semi_markov_state_path)
+                and semi_markov_state_path[idx] != semi_markov_state_path[idx - 1]
+            )
+            sign_changed = bool(
+                idx > 0
+                and sign_label
+                and prev_sign
+                and sign_label != prev_sign
+            )
+            if sign_changed:
+                sign_switch_count += 1
+            if idx > 0 and prev_method and method:
+                edge_key = (prev_method, method)
+                edge_counter[edge_key] = edge_counter.get(edge_key, 0) + 1
+                edge_rows.append(
+                    {
+                        "dataset_key": dataset_key,
+                        "discharge_type": str(ordered["discharge_type"].iloc[0]),
+                        "variant": str(ordered["variant"].iloc[0]),
+                        "from_method": prev_method,
+                        "to_method": method,
+                        "edge_count": 1,
+                        "is_method_switch": int(method_changed),
+                        "offset_step_abs_hz": float(offset_step_abs),
+                        "confidence_step_abs": float(confidence_step_abs),
+                    }
+                )
+                if np.isfinite(offset_step_abs):
+                    offset_step_values.append(float(offset_step_abs))
+                if np.isfinite(confidence_step_abs):
+                    confidence_step_values.append(float(confidence_step_abs))
+            sequence_rows.append(
+                {
+                    "dataset_key": dataset_key,
+                    "discharge_type": str(ordered["discharge_type"].iloc[0]),
+                    "variant": str(ordered["variant"].iloc[0]),
+                    "sequence_position": int(sequence_positions[idx]),
+                    "candidate_rank": int(candidate_rank_raw) if pd.notna(candidate_rank_raw) else 0,
+                    "local_window_index": int(local_window_raw) if pd.notna(local_window_raw) else 0,
+                    "local_selected_method": method,
+                    "local_freq_offset_from_global_hz": float(offsets[idx]) if np.isfinite(offsets[idx]) else float("nan"),
+                    "local_common_axial_confidence": float(confidences[idx]) if np.isfinite(confidences[idx]) else float("nan"),
+                    "local_freq_offset_sign": sign_label,
+                    "method_changed": int(method_changed),
+                    "bocpd_method_change_flag": float(method_change[idx]) if idx < len(method_change) else 0.0,
+                    "bocpd_signal": float(bocpd_signal[idx]) if idx < len(bocpd_signal) else float("nan"),
+                    "bocpd_change_prob": float(change_prob[idx]) if idx < len(change_prob) else float("nan"),
+                    "bocpd_expected_run_length": float(expected_run[idx]) if idx < len(expected_run) else float("nan"),
+                    "bocpd_log_surprise": float(log_surprise[idx]) if idx < len(log_surprise) else float("nan"),
+                    "hmm_state": int(hmm_state_path[idx]) if idx < len(hmm_state_path) else 0,
+                    "hmm_high_state_prob": float(hmm_high_prob[idx]) if idx < len(hmm_high_prob) else float("nan"),
+                    "hmm_state_changed": int(hmm_changed),
+                    "semi_markov_state": int(semi_markov_state_path[idx]) if idx < len(semi_markov_state_path) else 0,
+                    "semi_markov_state_changed": int(semi_markov_changed),
+                    "semi_markov_run_length": int(semi_markov_run_size_map.get(semi_markov_run_ids[idx], 1))
+                    if idx < len(semi_markov_run_ids)
+                    else 1,
+                    "offset_sign_changed": int(sign_changed),
+                    "regime_run_id": int(run_ids[idx]),
+                    "regime_run_length": int(run_size_map.get(run_ids[idx], 1)),
+                    "offset_step_abs_hz": float(offset_step_abs),
+                    "confidence_step_abs": float(confidence_step_abs),
+                }
+            )
+
+        edge_entropy = float("nan")
+        total_edges = int(sum(edge_counter.values()))
+        if total_edges > 0:
+            probs = np.asarray([float(count) / float(total_edges) for count in edge_counter.values()], dtype=np.float64)
+            positive = probs > 0
+            entropy = -np.sum(np.where(positive, probs * np.log2(np.clip(probs, 1e-12, None)), 0.0))
+            edge_entropy = float(entropy / np.log2(edge_universe))
+
+        run_lengths = list(run_size_map.values())
+        run_count = int(len(run_lengths))
+        mean_run_length = float(np.mean(run_lengths)) if run_lengths else float("nan")
+        max_run_length = int(max(run_lengths)) if run_lengths else 0
+        persistence_ratio = float(1.0 - (sum(methods[idx] != methods[idx - 1] for idx in range(1, len(methods))) / max(len(methods) - 1, 1))) if len(methods) >= 2 else 1.0
+        offset_sign_switch_rate = float(sign_switch_count / max(len(methods) - 1, 1)) if len(methods) >= 2 else 0.0
+        change_threshold = 0.25
+        hmm_run_lengths: list[int] = []
+        if len(hmm_state_path):
+            current_hmm_state = int(hmm_state_path[0])
+            current_hmm_run = 1
+            for idx in range(1, len(hmm_state_path)):
+                if int(hmm_state_path[idx]) == current_hmm_state:
+                    current_hmm_run += 1
+                else:
+                    hmm_run_lengths.append(current_hmm_run)
+                    current_hmm_state = int(hmm_state_path[idx])
+                    current_hmm_run = 1
+            hmm_run_lengths.append(current_hmm_run)
+        hmm_switch_count = int(np.sum(hmm_state_path[1:] != hmm_state_path[:-1])) if len(hmm_state_path) >= 2 else 0
+        hmm_switch_rate = float(hmm_switch_count / max(len(hmm_state_path) - 1, 1)) if len(hmm_state_path) >= 2 else 0.0
+        hmm_high_state_share = float(np.mean(hmm_state_path == 1)) if len(hmm_state_path) else float("nan")
+        semi_markov_segment_lengths = semi_markov_profile["segment_lengths"].astype(int).tolist()
+        semi_markov_switch_count = (
+            int(np.sum(semi_markov_state_path[1:] != semi_markov_state_path[:-1]))
+            if len(semi_markov_state_path) >= 2
+            else 0
+        )
+        semi_markov_switch_rate = (
+            float(semi_markov_switch_count / max(len(semi_markov_state_path) - 1, 1))
+            if len(semi_markov_state_path) >= 2
+            else 0.0
+        )
+        semi_markov_high_state_share = (
+            float(np.mean(semi_markov_state_path == 1))
+            if len(semi_markov_state_path)
+            else float("nan")
+        )
+        case_rows.append(
+            {
+                "dataset_key": dataset_key,
+                "local_regime_run_count": run_count,
+                "local_regime_mean_run_length": mean_run_length,
+                "local_regime_max_run_length": max_run_length,
+                "local_regime_persistence_ratio": persistence_ratio,
+                "local_regime_transition_entropy": edge_entropy,
+                "local_offset_sign_switch_count": int(sign_switch_count),
+                "local_offset_sign_switch_rate": offset_sign_switch_rate,
+                "local_abs_offset_step_mean_hz": float(np.mean(offset_step_values)) if offset_step_values else float("nan"),
+                "local_abs_offset_step_max_hz": float(np.max(offset_step_values)) if offset_step_values else float("nan"),
+                "local_abs_confidence_step_mean": float(np.mean(confidence_step_values)) if confidence_step_values else float("nan"),
+                "local_abs_confidence_step_max": float(np.max(confidence_step_values)) if confidence_step_values else float("nan"),
+                "bocpd_max_change_prob": float(np.max(change_prob)) if len(change_prob) else float("nan"),
+                "bocpd_mean_change_prob": float(np.mean(change_prob)) if len(change_prob) else float("nan"),
+                "bocpd_run_length_mean": float(np.mean(expected_run)) if len(expected_run) else float("nan"),
+                "bocpd_run_length_min": float(np.min(expected_run)) if len(expected_run) else float("nan"),
+                "bocpd_change_count": int(np.sum(change_prob >= change_threshold)) if len(change_prob) else 0,
+                "bocpd_surprise_score": float(np.max(log_surprise)) if len(log_surprise) else float("nan"),
+                "hmm_high_state_share": hmm_high_state_share,
+                "hmm_high_state_prob_mean": float(np.mean(hmm_high_prob)) if len(hmm_high_prob) else float("nan"),
+                "hmm_state_switch_count": hmm_switch_count,
+                "hmm_state_switch_rate": hmm_switch_rate,
+                "hmm_state_mean_run_length": float(np.mean(hmm_run_lengths)) if hmm_run_lengths else float("nan"),
+                "hmm_state_persistence_ratio": float(1.0 - hmm_switch_rate) if len(hmm_state_path) >= 2 else 1.0,
+                "hmm_state_entropy": float(hmm_profile["state_entropy"]),
+                "semi_markov_high_state_share": semi_markov_high_state_share,
+                "semi_markov_state_switch_count": semi_markov_switch_count,
+                "semi_markov_state_switch_rate": semi_markov_switch_rate,
+                "semi_markov_state_mean_run_length": float(np.mean(semi_markov_segment_lengths))
+                if semi_markov_segment_lengths
+                else float("nan"),
+                "semi_markov_state_persistence_ratio": float(1.0 - semi_markov_switch_rate)
+                if len(semi_markov_state_path) >= 2
+                else 1.0,
+                "semi_markov_state_entropy": float(semi_markov_profile["state_entropy"]),
+                "semi_markov_segment_count": int(len(semi_markov_segment_lengths)),
+                "semi_markov_short_run_count": int(semi_markov_profile["short_run_count"]),
+                "semi_markov_duration_surprise_mean": float(semi_markov_profile["duration_surprise_mean"]),
+            }
+        )
+
+    sequence_df = pd.DataFrame(sequence_rows)
+    case_df = pd.DataFrame(case_rows).sort_values("dataset_key").reset_index(drop=True) if case_rows else pd.DataFrame()
+    edge_df = pd.DataFrame(edge_rows)
+    if not edge_df.empty:
+        edge_df = (
+            edge_df.groupby(
+                ["dataset_key", "discharge_type", "variant", "from_method", "to_method"],
+                dropna=False,
+            )
+            .agg(
+                transition_count=("edge_count", "sum"),
+                switch_count=("is_method_switch", "sum"),
+                mean_offset_step_abs_hz=("offset_step_abs_hz", "mean"),
+                max_offset_step_abs_hz=("offset_step_abs_hz", "max"),
+                mean_confidence_step_abs=("confidence_step_abs", "mean"),
+                max_confidence_step_abs=("confidence_step_abs", "max"),
+            )
+            .reset_index()
+        )
+    return sequence_df, case_df, edge_df
+
+
 def _summarize_transition_overlap(
     overlap_master_df: pd.DataFrame,
     summary_df: pd.DataFrame,
@@ -611,13 +1620,7 @@ def _summarize_transition_overlap(
         method_summary_df = method_candidate_counts_df.copy()
 
     case_rows: list[dict[str, Any]] = []
-    known_methods = [
-        "coherence",
-        "harmonic_power",
-        "epoch_folding",
-        "gregory_loredo",
-        "phase_distance_correlation",
-    ]
+    known_methods = TRANSITION_METHOD_ORDER
     for dataset_key, df_case_all in overlap.groupby("dataset_key", dropna=False):
         df_case = primary_overlap[primary_overlap["dataset_key"] == dataset_key].copy()
         if df_case.empty:
@@ -644,6 +1647,13 @@ def _summarize_transition_overlap(
             .to_dict()
         )
         dominant_method = _dominant_transition_method(method_counts)
+        transition_entropy, dominant_share = _normalized_transition_entropy(
+            method_counts,
+            known_methods=known_methods,
+        )
+        switch_count, switch_rate = _transition_switch_metrics(df_case)
+        local_offset_series = pd.to_numeric(df_case["local_freq_offset_from_global_hz"], errors="coerce")
+        local_conf_series = pd.to_numeric(df_case["local_common_axial_confidence"], errors="coerce")
         row = {
             "dataset_key": dataset_key,
             "discharge_type": str(df_case["discharge_type"].iloc[0]),
@@ -655,9 +1665,13 @@ def _summarize_transition_overlap(
             "dominant_local_method": dominant_method,
             "max_abs_local_freq_offset_hz": float(df_case["abs_local_freq_offset_hz"].max()),
             "mean_abs_local_freq_offset_hz": float(df_case["abs_local_freq_offset_hz"].mean()),
-            "mean_local_common_axial_confidence": float(
-                pd.to_numeric(df_case["local_common_axial_confidence"], errors="coerce").mean()
-            ),
+            "local_freq_offset_std_hz": float(local_offset_series.std(ddof=0)),
+            "mean_local_common_axial_confidence": float(local_conf_series.mean()),
+            "local_common_axial_confidence_std": float(local_conf_series.std(ddof=0)),
+            "transition_method_entropy": transition_entropy,
+            "transition_dominant_method_share": dominant_share,
+            "local_method_switch_count": int(switch_count),
+            "local_method_switch_rate": float(switch_rate),
         }
         for method in known_methods:
             row[f"transition_count_{method}"] = int(method_counts.get(method, 0))
@@ -694,6 +1708,8 @@ def _plot_transition_method_mix(case_summary_df: pd.DataFrame, *, out_png: Path)
         "coherence": "#2d6a8a",
         "harmonic_power": "#c26d2d",
         "epoch_folding": "#6d597a",
+        "h_test": "#3a86ff",
+        "pdm": "#ff9f1c",
         "gregory_loredo": "#5d8f52",
         "phase_distance_correlation": "#9b2226",
     }
@@ -775,6 +1791,439 @@ def _plot_transition_offset_vs_scores(case_summary_df: pd.DataFrame, *, out_png:
     return out_png
 
 
+def _plot_transition_mix_stability(case_summary_df: pd.DataFrame, *, out_png: Path) -> Path | None:
+    if case_summary_df.empty:
+        return None
+    required = {
+        "dataset_key",
+        "transition_method_entropy",
+        "local_method_switch_rate",
+        "local_freq_offset_std_hz",
+        "local_common_axial_confidence_std",
+        "discharge_type",
+    }
+    if not required.issubset(case_summary_df.columns):
+        return None
+
+    ordered = case_summary_df.sort_values("dataset_key").reset_index(drop=True)
+    color_map = {
+        "internal": "#2d6a8a",
+        "superficial": "#c26d2d",
+        "multiple": "#6d597a",
+    }
+
+    fig, axes = plt.subplots(1, 2, figsize=(11.4, 4.8))
+    x = np.arange(len(ordered))
+    width = 0.36
+    entropy_vals = pd.to_numeric(ordered["transition_method_entropy"], errors="coerce").fillna(0.0).to_numpy()
+    switch_vals = pd.to_numeric(ordered["local_method_switch_rate"], errors="coerce").fillna(0.0).to_numpy()
+    axes[0].bar(x - width / 2.0, entropy_vals, width=width, color="#6d597a", label="Method entropy")
+    axes[0].bar(x + width / 2.0, switch_vals, width=width, color="#2d6a8a", label="Switch rate")
+    axes[0].set_xticks(x)
+    axes[0].set_xticklabels(ordered["dataset_key"].tolist())
+    axes[0].set_ylim(0.0, 1.02)
+    axes[0].set_title("Transition-local mix entropy and switching")
+    axes[0].grid(True, axis="y", linestyle="--", alpha=0.25)
+    axes[0].legend(loc="upper center", ncol=2)
+
+    for _, row in ordered.iterrows():
+        x_val = _safe_float(row.get("local_freq_offset_std_hz"))
+        y_val = _safe_float(row.get("local_common_axial_confidence_std"))
+        if pd.isna(x_val) or pd.isna(y_val):
+            continue
+        color = color_map.get(str(row.get("discharge_type", "")), "#555555")
+        axes[1].scatter(
+            x_val,
+            y_val,
+            s=90,
+            color=color,
+            edgecolors="white",
+            linewidths=0.8,
+            zorder=3,
+        )
+        axes[1].annotate(
+            str(row.get("dataset_key", "")),
+            (x_val, y_val),
+            textcoords="offset points",
+            xytext=(0, 8),
+            ha="center",
+            fontsize=8,
+        )
+    axes[1].set_xlabel("Local freq offset std (Hz)")
+    axes[1].set_ylabel("Local confidence std")
+    axes[1].set_title("Transition-local dispersion")
+    axes[1].grid(True, linestyle="--", alpha=0.25)
+
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+    return out_png
+
+
+def _plot_transition_regime_sequence(
+    sequence_df: pd.DataFrame,
+    case_summary_df: pd.DataFrame,
+    *,
+    out_png: Path,
+) -> Path | None:
+    if sequence_df.empty or case_summary_df.empty:
+        return None
+    required_sequence = {
+        "dataset_key",
+        "sequence_position",
+        "local_selected_method",
+        "local_common_axial_confidence",
+        "local_freq_offset_sign",
+    }
+    required_case = {
+        "dataset_key",
+        "local_regime_persistence_ratio",
+        "local_regime_transition_entropy",
+    }
+    if not required_sequence.issubset(sequence_df.columns) or not required_case.issubset(case_summary_df.columns):
+        return None
+
+    dataset_order = sorted(sequence_df["dataset_key"].astype(str).unique().tolist())
+    palette = {
+        "coherence": "#2d6a8a",
+        "harmonic_power": "#c26d2d",
+        "epoch_folding": "#6d597a",
+        "h_test": "#3a86ff",
+        "pdm": "#ff9f1c",
+        "gregory_loredo": "#5d8f52",
+        "phase_distance_correlation": "#9b2226",
+    }
+    marker_map = {
+        "positive": "^",
+        "negative": "v",
+        "zero": "o",
+        "": "o",
+    }
+    fig, axes = plt.subplots(
+        1,
+        2,
+        figsize=(12.0, 1.1 * len(dataset_order) + 3.0),
+        gridspec_kw={"width_ratios": [2.2, 1.0]},
+    )
+    ax_seq, ax_case = axes
+    y_positions = {dataset_key: idx for idx, dataset_key in enumerate(dataset_order)}
+
+    for dataset_key in dataset_order:
+        df_case = _order_transition_sequence_df(sequence_df[sequence_df["dataset_key"] == dataset_key])
+        if df_case.empty:
+            continue
+        y = y_positions[dataset_key]
+        x_vals = pd.to_numeric(df_case["sequence_position"], errors="coerce").to_numpy(dtype=np.float64)
+        ax_seq.plot(x_vals, np.full_like(x_vals, y, dtype=np.float64), color="#d8d2c6", linewidth=1.0, zorder=1)
+        for _, row in df_case.iterrows():
+            method = str(row.get("local_selected_method", ""))
+            color = palette.get(method, "#777777")
+            marker = marker_map.get(str(row.get("local_freq_offset_sign", "")), "o")
+            conf = _safe_float(row.get("local_common_axial_confidence"))
+            size = 70.0 + 110.0 * np.clip(conf if np.isfinite(conf) else 0.0, 0.0, 1.0)
+            ax_seq.scatter(
+                _safe_float(row.get("sequence_position")),
+                y,
+                s=size,
+                color=color,
+                marker=marker,
+                edgecolors="white",
+                linewidths=0.8,
+                zorder=3,
+            )
+        ax_seq.annotate(dataset_key, (0.75, y), ha="right", va="center", fontsize=9, color="#16324f")
+
+    ax_seq.set_yticks(list(y_positions.values()))
+    ax_seq.set_yticklabels(dataset_order)
+    ax_seq.set_xlabel("Local transition order")
+    ax_seq.set_title("Local regime chain by dataset")
+    ax_seq.grid(True, axis="x", linestyle="--", alpha=0.2)
+    ax_seq.set_ylim(-0.75, len(dataset_order) - 0.25)
+    ax_seq.invert_yaxis()
+
+    case_ordered = case_summary_df.sort_values("dataset_key").reset_index(drop=True)
+    persistence = pd.to_numeric(case_ordered["local_regime_persistence_ratio"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
+    entropy = pd.to_numeric(case_ordered["local_regime_transition_entropy"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
+    y_case = np.arange(len(case_ordered))
+    width = 0.36
+    ax_case.barh(y_case - width / 2.0, persistence, height=width, color="#2d6a8a", label="Persistence")
+    ax_case.barh(y_case + width / 2.0, entropy, height=width, color="#6d597a", label="Seq. entropy")
+    ax_case.set_yticks(y_case)
+    ax_case.set_yticklabels(case_ordered["dataset_key"].astype(str).tolist())
+    ax_case.set_xlim(0.0, 1.02)
+    ax_case.set_title("Persistence vs sequence entropy")
+    ax_case.grid(True, axis="x", linestyle="--", alpha=0.2)
+    ax_case.legend(loc="lower right")
+    ax_case.invert_yaxis()
+
+    handles = [
+        Line2D([0], [0], marker="o", color="w", markerfacecolor=palette.get(method, "#777777"), label=method, markersize=8)
+        for method in TRANSITION_METHOD_ORDER
+        if method in sequence_df["local_selected_method"].astype(str).unique().tolist()
+    ]
+    if handles:
+        ax_seq.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=max(1, min(3, len(handles))))
+
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+    return out_png
+
+
+def _build_transition_local_wavelet_signal(
+    df_events: pd.DataFrame,
+    *,
+    n_bins: int = 64,
+) -> np.ndarray:
+    if df_events.empty or n_bins < 8:
+        return np.zeros(max(n_bins, 8), dtype=np.float64)
+
+    work = df_events.copy()
+    toa = pd.to_numeric(work.get("toa_s"), errors="coerce")
+    peak = pd.to_numeric(work.get("peak_v"), errors="coerce").fillna(1.0)
+    valid = pd.DataFrame({"toa_s": toa, "peak_v": peak}).dropna()
+    if valid.empty:
+        return np.zeros(n_bins, dtype=np.float64)
+
+    times = valid["toa_s"].to_numpy(dtype=np.float64)
+    weights = np.abs(valid["peak_v"].to_numpy(dtype=np.float64))
+    signal = np.zeros(n_bins, dtype=np.float64)
+    if len(times) == 1 or float(times.max() - times.min()) <= 1e-12:
+        signal[0] = float(np.sum(weights))
+        return signal
+
+    scaled = (times - float(times.min())) / float(times.max() - times.min())
+    bins = np.clip(np.floor(scaled * (n_bins - 1)).astype(int), 0, n_bins - 1)
+    np.add.at(signal, bins, weights)
+    signal = signal - float(np.mean(signal))
+    scale = float(np.std(signal, ddof=0))
+    if scale > 1e-12 and np.isfinite(scale):
+        signal = signal / scale
+    return signal
+
+
+def _wavelet_energy_profile(
+    signal: np.ndarray,
+    *,
+    wavelet: str = "db4",
+    max_level: int = 3,
+) -> dict[str, Any]:
+    data = np.asarray(signal, dtype=np.float64)
+    if data.size < 8 or not np.isfinite(data).any() or np.allclose(data, 0.0):
+        return {
+            "tfa_wavelet_entropy": float("nan"),
+            "tfa_wavelet_dominant_band": "",
+            "tfa_wavelet_dominant_band_share": float("nan"),
+            "tfa_wavelet_detail_entropy": float("nan"),
+            "tfa_wavelet_detail_dominant_band": "",
+            "tfa_wavelet_detail_dominant_band_share": float("nan"),
+        }
+
+    level = min(int(max_level), int(pywt.dwt_max_level(len(data), wavelet)))
+    if level <= 0:
+        level = 1
+    coeffs = pywt.wavedec(data, wavelet, level=level)
+    band_labels = [f"A{level}"] + [f"D{idx}" for idx in range(level, 0, -1)]
+    energies = np.asarray([float(np.sum(np.square(np.asarray(c, dtype=np.float64)))) for c in coeffs], dtype=np.float64)
+    total_energy = float(np.sum(energies))
+    if total_energy <= 0 or not np.isfinite(total_energy):
+        return {
+            "tfa_wavelet_entropy": float("nan"),
+            "tfa_wavelet_dominant_band": "",
+            "tfa_wavelet_dominant_band_share": float("nan"),
+            "tfa_wavelet_detail_entropy": float("nan"),
+            "tfa_wavelet_detail_dominant_band": "",
+            "tfa_wavelet_detail_dominant_band_share": float("nan"),
+        }
+
+    shares = energies / total_energy
+    positive = shares > 0
+    entropy = -np.sum(np.where(positive, shares * np.log2(np.clip(shares, 1e-12, None)), 0.0))
+    entropy_denom = np.log2(max(len(shares), 2))
+    dominant_idx = int(np.argmax(shares))
+    detail_energies = energies[1:] if len(energies) > 1 else energies[:0]
+    detail_labels = band_labels[1:] if len(band_labels) > 1 else band_labels[:0]
+    detail_entropy = float("nan")
+    detail_dominant_band = ""
+    detail_dominant_share = float("nan")
+    detail_total = float(np.sum(detail_energies))
+    if detail_total > 0 and len(detail_energies) > 0:
+        detail_shares = detail_energies / detail_total
+        detail_positive = detail_shares > 0
+        detail_entropy_raw = -np.sum(
+            np.where(detail_positive, detail_shares * np.log2(np.clip(detail_shares, 1e-12, None)), 0.0)
+        )
+        detail_denom = np.log2(max(len(detail_shares), 2))
+        detail_entropy = float(detail_entropy_raw / detail_denom) if detail_denom > 0 else float("nan")
+        detail_idx = int(np.argmax(detail_shares))
+        detail_dominant_band = detail_labels[detail_idx]
+        detail_dominant_share = float(detail_shares[detail_idx])
+    return {
+        "tfa_wavelet_entropy": float(entropy / entropy_denom) if entropy_denom > 0 else float("nan"),
+        "tfa_wavelet_dominant_band": band_labels[dominant_idx],
+        "tfa_wavelet_dominant_band_share": float(shares[dominant_idx]),
+        "tfa_wavelet_detail_entropy": detail_entropy,
+        "tfa_wavelet_detail_dominant_band": detail_dominant_band,
+        "tfa_wavelet_detail_dominant_band_share": detail_dominant_share,
+    }
+
+
+def _summarize_transition_local_wavelet(
+    primary_overlap_df: pd.DataFrame,
+    summary_df: pd.DataFrame,
+    *,
+    n_bins: int = 64,
+    wavelet: str = "db4",
+    max_level: int = 3,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if primary_overlap_df.empty or summary_df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    window_rows: list[dict[str, Any]] = []
+    band_order: dict[str, int] = {}
+    for dataset_key, df_case in primary_overlap_df.groupby("dataset_key", dropna=False):
+        case_meta = summary_df[summary_df["dataset_key"] == dataset_key]
+        if case_meta.empty:
+            continue
+        study_output_dir = Path(str(case_meta["study_output_dir"].iloc[0]))
+        material_output_dir = study_output_dir.parent / "material"
+        blind_trace_path = material_output_dir / "blind_prpd_local_trace.csv"
+        delta_path = material_output_dir / "delta_t_series_master.csv"
+        if not blind_trace_path.exists() or not delta_path.exists():
+            continue
+
+        blind_trace_df = pd.read_csv(blind_trace_path)
+        delta_df = pd.read_csv(delta_path, usecols=["toa_s", "peak_v"])
+        if blind_trace_df.empty or delta_df.empty:
+            continue
+
+        for _, overlap_row in df_case.iterrows():
+            local_idx = pd.to_numeric(overlap_row.get("local_window_index"), errors="coerce")
+            if pd.isna(local_idx):
+                continue
+            trace_match = blind_trace_df[blind_trace_df["local_window_index"] == int(local_idx)]
+            if trace_match.empty:
+                continue
+            trace_row = trace_match.iloc[0]
+            start_idx = int(pd.to_numeric(trace_row.get("event_start_idx"), errors="coerce") or 0)
+            end_idx = int(pd.to_numeric(trace_row.get("event_end_idx"), errors="coerce") or start_idx)
+            df_events = delta_df.iloc[start_idx : end_idx + 1].copy()
+            if df_events.empty:
+                continue
+            binned_signal = _build_transition_local_wavelet_signal(df_events, n_bins=n_bins)
+            profile = _wavelet_energy_profile(
+                binned_signal,
+                wavelet=wavelet,
+                max_level=max_level,
+            )
+            band_label = str(profile.get("tfa_wavelet_dominant_band", ""))
+            if band_label and band_label not in band_order:
+                band_order[band_label] = len(band_order)
+            window_rows.append(
+                {
+                    "dataset_key": dataset_key,
+                    "local_window_index": int(local_idx),
+                    "candidate_rank": int(pd.to_numeric(overlap_row.get("candidate_rank"), errors="coerce") or 0),
+                    "local_selected_method": str(overlap_row.get("local_selected_method", "")),
+                    **profile,
+                }
+            )
+
+    window_df = pd.DataFrame(window_rows)
+    if window_df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    case_rows: list[dict[str, Any]] = []
+    for dataset_key, df_case in window_df.groupby("dataset_key", dropna=False):
+        dominant_counts = (
+            df_case["tfa_wavelet_dominant_band"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .replace("", pd.NA)
+            .dropna()
+            .value_counts()
+            .to_dict()
+        )
+        detail_band_counts = (
+            df_case["tfa_wavelet_detail_dominant_band"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .replace("", pd.NA)
+            .dropna()
+            .value_counts()
+            .to_dict()
+        )
+        dominant_labels = (
+            df_case.sort_values(["local_window_index", "candidate_rank"], kind="mergesort")["tfa_wavelet_dominant_band"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .replace("", pd.NA)
+            .dropna()
+            .tolist()
+        )
+        detail_labels = (
+            df_case.sort_values(["local_window_index", "candidate_rank"], kind="mergesort")["tfa_wavelet_detail_dominant_band"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .replace("", pd.NA)
+            .dropna()
+            .tolist()
+        )
+        switch_count = 0
+        switch_rate = 0.0
+        if len(dominant_labels) >= 2:
+            switch_count = int(sum(curr != prev for prev, curr in zip(dominant_labels, dominant_labels[1:])))
+            switch_rate = float(switch_count / max(len(dominant_labels) - 1, 1))
+        detail_switch_count = 0
+        detail_switch_rate = 0.0
+        if len(detail_labels) >= 2:
+            detail_switch_count = int(sum(curr != prev for prev, curr in zip(detail_labels, detail_labels[1:])))
+            detail_switch_rate = float(detail_switch_count / max(len(detail_labels) - 1, 1))
+        total = float(sum(dominant_counts.values()))
+        dominant_entropy = float("nan")
+        if total > 0:
+            probs = np.asarray([float(count) / total for count in dominant_counts.values()], dtype=np.float64)
+            positive = probs > 0
+            entropy = -np.sum(np.where(positive, probs * np.log2(np.clip(probs, 1e-12, None)), 0.0))
+            denom = np.log2(max(len(band_order), 2))
+            dominant_entropy = float(entropy / denom) if denom > 0 else float("nan")
+        detail_band_entropy = float("nan")
+        detail_total = float(sum(detail_band_counts.values()))
+        if detail_total > 0:
+            detail_probs = np.asarray([float(count) / detail_total for count in detail_band_counts.values()], dtype=np.float64)
+            detail_positive = detail_probs > 0
+            detail_entropy_raw = -np.sum(
+                np.where(detail_positive, detail_probs * np.log2(np.clip(detail_probs, 1e-12, None)), 0.0)
+            )
+            detail_denom = np.log2(max(len(detail_band_counts), 2))
+            detail_band_entropy = float(detail_entropy_raw / detail_denom) if detail_denom > 0 else float("nan")
+        case_rows.append(
+            {
+                "dataset_key": dataset_key,
+                "tfa_wavelet_entropy_mean": float(pd.to_numeric(df_case["tfa_wavelet_entropy"], errors="coerce").mean()),
+                "tfa_wavelet_entropy_max": float(pd.to_numeric(df_case["tfa_wavelet_entropy"], errors="coerce").max()),
+                "tfa_wavelet_dominant_band_unique_count": int(len(dominant_counts)),
+                "tfa_wavelet_dominant_band_entropy": dominant_entropy,
+                "tfa_wavelet_dominant_band_switch_count": int(switch_count),
+                "tfa_wavelet_dominant_band_switch_rate": float(switch_rate),
+                "tfa_wavelet_dominant_band_top": max(dominant_counts, key=dominant_counts.get) if dominant_counts else "",
+                "tfa_wavelet_detail_entropy_mean": float(pd.to_numeric(df_case["tfa_wavelet_detail_entropy"], errors="coerce").mean()),
+                "tfa_wavelet_detail_entropy_max": float(pd.to_numeric(df_case["tfa_wavelet_detail_entropy"], errors="coerce").max()),
+                "tfa_wavelet_detail_dominant_band_unique_count": int(len(detail_band_counts)),
+                "tfa_wavelet_detail_dominant_band_entropy": detail_band_entropy,
+                "tfa_wavelet_detail_dominant_band_switch_count": int(detail_switch_count),
+                "tfa_wavelet_detail_dominant_band_switch_rate": float(detail_switch_rate),
+                "tfa_wavelet_detail_dominant_band_top": max(detail_band_counts, key=detail_band_counts.get) if detail_band_counts else "",
+            }
+        )
+
+    return window_df, pd.DataFrame(case_rows).sort_values("dataset_key").reset_index(drop=True)
+
+
 def run_state_alarm_batch(config_path: str | Path) -> dict[str, Any]:
     with open(config_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
@@ -854,12 +2303,48 @@ def run_state_alarm_batch(config_path: str | Path) -> dict[str, Any]:
         overlap_master_df,
         summary_df,
     )
+    primary_overlap_df = _select_primary_transition_matches(overlap_master_df)
+    transition_sequence_window_df, transition_sequence_case_df, transition_sequence_edge_df = _summarize_transition_local_sequence(
+        primary_overlap_df,
+        summary_df,
+    )
+    transition_tfa_window_df, transition_tfa_case_df = _summarize_transition_local_wavelet(
+        primary_overlap_df,
+        summary_df,
+    )
+    if not case_transition_summary_df.empty and not transition_sequence_case_df.empty:
+        case_transition_summary_df = case_transition_summary_df.merge(
+            transition_sequence_case_df,
+            on="dataset_key",
+            how="left",
+        )
+    if not case_transition_summary_df.empty and not transition_tfa_case_df.empty:
+        case_transition_summary_df = case_transition_summary_df.merge(
+            transition_tfa_case_df,
+            on="dataset_key",
+            how="left",
+        )
     case_transition_csv_path = output_root / "transition_overlap_case_summary.csv"
     method_transition_csv_path = output_root / "transition_overlap_method_summary.csv"
+    transition_sequence_window_csv_path = output_root / "transition_local_sequence_windows.csv"
+    transition_sequence_case_csv_path = output_root / "transition_local_sequence_case_summary.csv"
+    transition_sequence_edge_csv_path = output_root / "transition_local_sequence_edges.csv"
+    transition_tfa_window_csv_path = output_root / "transition_local_wavelet_windows.csv"
+    transition_tfa_case_csv_path = output_root / "transition_local_wavelet_case_summary.csv"
     if not case_transition_summary_df.empty:
         case_transition_summary_df.to_csv(case_transition_csv_path, index=False, encoding="utf-8-sig")
     if not method_transition_summary_df.empty:
         method_transition_summary_df.to_csv(method_transition_csv_path, index=False, encoding="utf-8-sig")
+    if not transition_sequence_window_df.empty:
+        transition_sequence_window_df.to_csv(transition_sequence_window_csv_path, index=False, encoding="utf-8-sig")
+    if not transition_sequence_case_df.empty:
+        transition_sequence_case_df.to_csv(transition_sequence_case_csv_path, index=False, encoding="utf-8-sig")
+    if not transition_sequence_edge_df.empty:
+        transition_sequence_edge_df.to_csv(transition_sequence_edge_csv_path, index=False, encoding="utf-8-sig")
+    if not transition_tfa_window_df.empty:
+        transition_tfa_window_df.to_csv(transition_tfa_window_csv_path, index=False, encoding="utf-8-sig")
+    if not transition_tfa_case_df.empty:
+        transition_tfa_case_df.to_csv(transition_tfa_case_csv_path, index=False, encoding="utf-8-sig")
 
     transition_method_mix_png = _plot_transition_method_mix(
         case_transition_summary_df,
@@ -868,6 +2353,15 @@ def run_state_alarm_batch(config_path: str | Path) -> dict[str, Any]:
     transition_offset_score_png = _plot_transition_offset_vs_scores(
         case_transition_summary_df,
         out_png=output_root / "transition_offset_vs_scores.png",
+    )
+    transition_mix_stability_png = _plot_transition_mix_stability(
+        case_transition_summary_df,
+        out_png=output_root / "transition_mix_stability.png",
+    )
+    transition_regime_sequence_png = _plot_transition_regime_sequence(
+        transition_sequence_window_df,
+        case_transition_summary_df,
+        out_png=output_root / "transition_regime_sequence.png",
     )
 
     state_feature_counts = _feature_frequency(summary_rows, "state_features")
@@ -893,8 +2387,15 @@ def run_state_alarm_batch(config_path: str | Path) -> dict[str, Any]:
         "transition_overlap_master_csv": str(overlap_master_csv_path) if overlap_master_df is not None and not overlap_master_df.empty else "",
         "transition_overlap_case_summary_csv": str(case_transition_csv_path) if not case_transition_summary_df.empty else "",
         "transition_overlap_method_summary_csv": str(method_transition_csv_path) if not method_transition_summary_df.empty else "",
+        "transition_local_sequence_windows_csv": str(transition_sequence_window_csv_path) if not transition_sequence_window_df.empty else "",
+        "transition_local_sequence_case_summary_csv": str(transition_sequence_case_csv_path) if not transition_sequence_case_df.empty else "",
+        "transition_local_sequence_edges_csv": str(transition_sequence_edge_csv_path) if not transition_sequence_edge_df.empty else "",
+        "transition_local_wavelet_windows_csv": str(transition_tfa_window_csv_path) if not transition_tfa_window_df.empty else "",
+        "transition_local_wavelet_case_summary_csv": str(transition_tfa_case_csv_path) if not transition_tfa_case_df.empty else "",
         "transition_method_mix_png": str(transition_method_mix_png) if transition_method_mix_png is not None else "",
         "transition_offset_vs_scores_png": str(transition_offset_score_png) if transition_offset_score_png is not None else "",
+        "transition_mix_stability_png": str(transition_mix_stability_png) if transition_mix_stability_png is not None else "",
+        "transition_regime_sequence_png": str(transition_regime_sequence_png) if transition_regime_sequence_png is not None else "",
         "cases": manifest_cases,
     }
     manifest_path = output_root / "state_alarm_batch_manifest.json"

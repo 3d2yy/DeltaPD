@@ -8,6 +8,7 @@ from deltapd.campaign.comparative_thesis_study import (
     _augment_transition_case_metrics,
     _build_comparative_artifacts,
     _loo_nearest_centroid_case_level,
+    _partition_comparative_feature_blocks,
     build_comparative_event_table,
 )
 
@@ -154,7 +155,32 @@ def test_build_comparative_artifacts_writes_markdown_and_plots():
                     "dominant_local_method": "coherence",
                     "max_abs_local_freq_offset_hz": 0.12,
                     "mean_abs_local_freq_offset_hz": 0.08,
+                    "local_freq_offset_std_hz": 0.03,
                     "mean_local_common_axial_confidence": 0.61,
+                    "local_common_axial_confidence_std": 0.09,
+                    "transition_method_entropy": 0.42,
+                    "transition_dominant_method_share": 0.67,
+                    "local_method_switch_count": 1,
+                    "local_method_switch_rate": 0.5,
+                    "local_regime_run_count": 2,
+                    "local_regime_mean_run_length": 1.5,
+                    "local_regime_max_run_length": 2,
+                    "local_regime_persistence_ratio": 0.5,
+                    "local_regime_transition_entropy": 0.0,
+                    "local_offset_sign_switch_count": 1,
+                    "local_offset_sign_switch_rate": 0.5,
+                    "tfa_wavelet_entropy_mean": 0.51,
+                    "tfa_wavelet_entropy_max": 0.67,
+                    "tfa_wavelet_dominant_band_unique_count": 2,
+                    "tfa_wavelet_dominant_band_entropy": 0.44,
+                    "tfa_wavelet_dominant_band_switch_count": 1,
+                    "tfa_wavelet_dominant_band_switch_rate": 0.5,
+                    "tfa_wavelet_detail_entropy_mean": 0.58,
+                    "tfa_wavelet_detail_entropy_max": 0.74,
+                    "tfa_wavelet_detail_dominant_band_unique_count": 2,
+                    "tfa_wavelet_detail_dominant_band_entropy": 0.50,
+                    "tfa_wavelet_detail_dominant_band_switch_count": 1,
+                    "tfa_wavelet_detail_dominant_band_switch_rate": 0.5,
                     "state_primary_score": 0.82,
                     "alarm_primary_score": 0.87,
                     "transition_count_coherence": 2,
@@ -171,7 +197,32 @@ def test_build_comparative_artifacts_writes_markdown_and_plots():
                     "dominant_local_method": "epoch_folding",
                     "max_abs_local_freq_offset_hz": 0.02,
                     "mean_abs_local_freq_offset_hz": 0.01,
+                    "local_freq_offset_std_hz": 0.01,
                     "mean_local_common_axial_confidence": 0.30,
+                    "local_common_axial_confidence_std": 0.04,
+                    "transition_method_entropy": 0.00,
+                    "transition_dominant_method_share": 1.00,
+                    "local_method_switch_count": 0,
+                    "local_method_switch_rate": 0.0,
+                    "local_regime_run_count": 1,
+                    "local_regime_mean_run_length": 3.0,
+                    "local_regime_max_run_length": 3,
+                    "local_regime_persistence_ratio": 1.0,
+                    "local_regime_transition_entropy": 0.0,
+                    "local_offset_sign_switch_count": 0,
+                    "local_offset_sign_switch_rate": 0.0,
+                    "tfa_wavelet_entropy_mean": 0.19,
+                    "tfa_wavelet_entropy_max": 0.25,
+                    "tfa_wavelet_dominant_band_unique_count": 1,
+                    "tfa_wavelet_dominant_band_entropy": 0.0,
+                    "tfa_wavelet_dominant_band_switch_count": 0,
+                    "tfa_wavelet_dominant_band_switch_rate": 0.0,
+                    "tfa_wavelet_detail_entropy_mean": 0.21,
+                    "tfa_wavelet_detail_entropy_max": 0.28,
+                    "tfa_wavelet_detail_dominant_band_unique_count": 1,
+                    "tfa_wavelet_detail_dominant_band_entropy": 0.0,
+                    "tfa_wavelet_detail_dominant_band_switch_count": 0,
+                    "tfa_wavelet_detail_dominant_band_switch_rate": 0.0,
                     "state_primary_score": 0.90,
                     "alarm_primary_score": 0.95,
                     "transition_count_coherence": 0,
@@ -188,7 +239,32 @@ def test_build_comparative_artifacts_writes_markdown_and_plots():
                     "dominant_local_method": "harmonic_power",
                     "max_abs_local_freq_offset_hz": 0.07,
                     "mean_abs_local_freq_offset_hz": 0.03,
+                    "local_freq_offset_std_hz": 0.02,
                     "mean_local_common_axial_confidence": 0.56,
+                    "local_common_axial_confidence_std": 0.07,
+                    "transition_method_entropy": 0.68,
+                    "transition_dominant_method_share": 0.50,
+                    "local_method_switch_count": 2,
+                    "local_method_switch_rate": 0.67,
+                    "local_regime_run_count": 3,
+                    "local_regime_mean_run_length": 1.33,
+                    "local_regime_max_run_length": 2,
+                    "local_regime_persistence_ratio": 0.33,
+                    "local_regime_transition_entropy": 0.58,
+                    "local_offset_sign_switch_count": 1,
+                    "local_offset_sign_switch_rate": 0.33,
+                    "tfa_wavelet_entropy_mean": 0.63,
+                    "tfa_wavelet_entropy_max": 0.72,
+                    "tfa_wavelet_dominant_band_unique_count": 3,
+                    "tfa_wavelet_dominant_band_entropy": 0.62,
+                    "tfa_wavelet_dominant_band_switch_count": 2,
+                    "tfa_wavelet_dominant_band_switch_rate": 0.67,
+                    "tfa_wavelet_detail_entropy_mean": 0.71,
+                    "tfa_wavelet_detail_entropy_max": 0.81,
+                    "tfa_wavelet_detail_dominant_band_unique_count": 3,
+                    "tfa_wavelet_detail_dominant_band_entropy": 0.70,
+                    "tfa_wavelet_detail_dominant_band_switch_count": 2,
+                    "tfa_wavelet_detail_dominant_band_switch_rate": 0.67,
                     "state_primary_score": 0.88,
                     "alarm_primary_score": 0.93,
                     "transition_count_coherence": 1,
@@ -205,7 +281,32 @@ def test_build_comparative_artifacts_writes_markdown_and_plots():
                     "dominant_local_method": "epoch_folding",
                     "max_abs_local_freq_offset_hz": 0.03,
                     "mean_abs_local_freq_offset_hz": 0.02,
+                    "local_freq_offset_std_hz": 0.01,
                     "mean_local_common_axial_confidence": 0.34,
+                    "local_common_axial_confidence_std": 0.05,
+                    "transition_method_entropy": 0.00,
+                    "transition_dominant_method_share": 1.00,
+                    "local_method_switch_count": 0,
+                    "local_method_switch_rate": 0.0,
+                    "local_regime_run_count": 1,
+                    "local_regime_mean_run_length": 3.0,
+                    "local_regime_max_run_length": 3,
+                    "local_regime_persistence_ratio": 1.0,
+                    "local_regime_transition_entropy": 0.0,
+                    "local_offset_sign_switch_count": 0,
+                    "local_offset_sign_switch_rate": 0.0,
+                    "tfa_wavelet_entropy_mean": 0.22,
+                    "tfa_wavelet_entropy_max": 0.30,
+                    "tfa_wavelet_dominant_band_unique_count": 1,
+                    "tfa_wavelet_dominant_band_entropy": 0.0,
+                    "tfa_wavelet_dominant_band_switch_count": 0,
+                    "tfa_wavelet_dominant_band_switch_rate": 0.0,
+                    "tfa_wavelet_detail_entropy_mean": 0.24,
+                    "tfa_wavelet_detail_entropy_max": 0.31,
+                    "tfa_wavelet_detail_dominant_band_unique_count": 1,
+                    "tfa_wavelet_detail_dominant_band_entropy": 0.0,
+                    "tfa_wavelet_detail_dominant_band_switch_count": 0,
+                    "tfa_wavelet_detail_dominant_band_switch_rate": 0.0,
                     "state_primary_score": 0.79,
                     "alarm_primary_score": 0.89,
                     "transition_count_coherence": 0,
@@ -214,10 +315,157 @@ def test_build_comparative_artifacts_writes_markdown_and_plots():
                 },
             ]
         )
+        transition_case_df["hmm_high_state_share"] = [0.62, 0.18, 0.74, 0.16]
+        transition_case_df["hmm_high_state_prob_mean"] = [0.69, 0.24, 0.77, 0.21]
+        transition_case_df["hmm_state_switch_count"] = [1, 0, 2, 0]
+        transition_case_df["hmm_state_switch_rate"] = [0.50, 0.00, 0.67, 0.00]
+        transition_case_df["hmm_state_mean_run_length"] = [1.5, 3.0, 1.33, 3.0]
+        transition_case_df["hmm_state_persistence_ratio"] = [0.50, 1.00, 0.33, 1.00]
+        transition_case_df["hmm_state_entropy"] = [0.92, 0.31, 0.88, 0.28]
+        transition_case_df["semi_markov_high_state_share"] = [0.55, 0.10, 0.66, 0.12]
+        transition_case_df["semi_markov_state_switch_count"] = [1, 0, 1, 0]
+        transition_case_df["semi_markov_state_switch_rate"] = [0.50, 0.00, 0.33, 0.00]
+        transition_case_df["semi_markov_state_mean_run_length"] = [1.5, 3.0, 2.0, 3.0]
+        transition_case_df["semi_markov_state_persistence_ratio"] = [0.50, 1.00, 0.67, 1.00]
+        transition_case_df["semi_markov_state_entropy"] = [0.92, 0.00, 0.92, 0.00]
+        transition_case_df["semi_markov_segment_count"] = [2, 1, 2, 1]
+        transition_case_df["semi_markov_short_run_count"] = [0, 0, 0, 0]
+        transition_case_df["semi_markov_duration_surprise_mean"] = [1.2, 0.9, 1.3, 0.8]
+        block_ablation_df = pd.DataFrame(
+            [
+                {
+                    "task_name": "dataset6",
+                    "block_name": "temporal",
+                    "block_label": "Temporal only",
+                    "features": ["cv2_dt", "local_variation"],
+                    "primary_metric": "macro_f1",
+                    "primary_score": 0.71,
+                    "balanced_accuracy": 0.72,
+                    "strategy": "forward",
+                },
+                {
+                    "task_name": "dataset6",
+                    "block_name": "phase_prpd",
+                    "block_label": "Phase/PRPD only",
+                    "features": ["phase_kuramoto_r"],
+                    "primary_metric": "macro_f1",
+                    "primary_score": 0.62,
+                    "balanced_accuracy": 0.63,
+                    "strategy": "univariate",
+                },
+                {
+                    "task_name": "dataset6",
+                    "block_name": "fused",
+                    "block_label": "Temporal + Phase",
+                    "features": ["cv2_dt", "phase_kuramoto_r"],
+                    "primary_metric": "macro_f1",
+                    "primary_score": 0.83,
+                    "balanced_accuracy": 0.84,
+                    "strategy": "forward",
+                },
+                {
+                    "task_name": "type3",
+                    "block_name": "temporal",
+                    "block_label": "Temporal only",
+                    "features": ["p90_dt_s", "local_variation"],
+                    "primary_metric": "macro_f1",
+                    "primary_score": 0.88,
+                    "balanced_accuracy": 0.89,
+                    "strategy": "forward",
+                },
+                {
+                    "task_name": "type3",
+                    "block_name": "phase_prpd",
+                    "block_label": "Phase/PRPD only",
+                    "features": ["phase_kuramoto_r"],
+                    "primary_metric": "macro_f1",
+                    "primary_score": 0.74,
+                    "balanced_accuracy": 0.75,
+                    "strategy": "univariate",
+                },
+                {
+                    "task_name": "type3",
+                    "block_name": "fused",
+                    "block_label": "Temporal + Phase",
+                    "features": ["p90_dt_s", "phase_kuramoto_r"],
+                    "primary_metric": "macro_f1",
+                    "primary_score": 0.95,
+                    "balanced_accuracy": 0.96,
+                    "strategy": "forward",
+                },
+                {
+                    "task_name": "variant2",
+                    "block_name": "temporal",
+                    "block_label": "Temporal only",
+                    "features": ["weibull_beta", "p90_dt_s"],
+                    "primary_metric": "auroc",
+                    "primary_score": 0.77,
+                    "balanced_accuracy": 0.71,
+                    "strategy": "exhaustive",
+                },
+                {
+                    "task_name": "variant2",
+                    "block_name": "phase_prpd",
+                    "block_label": "Phase/PRPD only",
+                    "features": ["phase_kuramoto_r"],
+                    "primary_metric": "auroc",
+                    "primary_score": 0.64,
+                    "balanced_accuracy": 0.60,
+                    "strategy": "univariate",
+                },
+                {
+                    "task_name": "variant2",
+                    "block_name": "fused",
+                    "block_label": "Temporal + Phase",
+                    "features": ["weibull_beta", "phase_kuramoto_r"],
+                    "primary_metric": "auroc",
+                    "primary_score": 0.81,
+                    "balanced_accuracy": 0.76,
+                    "strategy": "forward",
+                },
+            ]
+        )
+        semicycle_ablation_df = pd.DataFrame(
+            [
+                {
+                    "task_name": "dataset6",
+                    "block_name": "negative",
+                    "block_label": "Negative semicycle",
+                    "features": ["phase_neg_q75_deg", "phase_neg_count"],
+                    "primary_metric": "macro_f1",
+                    "primary_score": 0.74,
+                    "balanced_accuracy": 0.75,
+                    "strategy": "forward",
+                },
+                {
+                    "task_name": "dataset6",
+                    "block_name": "positive",
+                    "block_label": "Positive semicycle",
+                    "features": ["phase_pos_mean_deg"],
+                    "primary_metric": "macro_f1",
+                    "primary_score": 0.62,
+                    "balanced_accuracy": 0.63,
+                    "strategy": "univariate",
+                },
+                {
+                    "task_name": "dataset6",
+                    "block_name": "both",
+                    "block_label": "Both semicycles",
+                    "features": ["phase_neg_q75_deg", "phase_pos_mean_deg"],
+                    "primary_metric": "macro_f1",
+                    "primary_score": 0.80,
+                    "balanced_accuracy": 0.81,
+                    "strategy": "forward",
+                },
+            ]
+        )
         outputs = _build_comparative_artifacts(
             output_dir=output_dir,
             channel="CH3",
             dataset_keys=["P1", "P2", "G1", "G2"],
+            block_ablation_df=block_ablation_df,
+            block_auxiliary_features=["mean_peak_v"],
+            semicycle_ablation_df=semicycle_ablation_df,
             transition_case_df=transition_case_df,
             transition_eval={
                 "type3": {
@@ -231,10 +479,30 @@ def test_build_comparative_artifacts_writes_markdown_and_plots():
         report_text = Path(outputs["markdown_path"]).read_text(encoding="utf-8")
         assert "type3" in report_text
         assert "p90_dt_s, local_variation, phase_kuramoto_r" in report_text
+        assert "Strict block ablation" in report_text
+        assert "Semicycle PRPD baseline" in report_text
+        assert "Negative semicycle" in report_text
+        assert "Both semicycles" in report_text
+        assert "Reserve-only auxiliary features excluded from this strict comparison" in report_text
         assert "Exploratory case-level transition metrics" in report_text
+        assert "Method entropy" in report_text
+        assert "Switch rate" in report_text
+        assert "Seq. entropy" in report_text
+        assert "Mean run" in report_text
+        assert "Sign-switch rate" in report_text
+        assert "Wavelet H mean" in report_text
+        assert "Wavelet band diversity" in report_text
+        assert "Wavelet detail H" in report_text
+        assert "Wavelet detail diversity" in report_text
         assert "deduplicated by matched local blind-PRPD window" in report_text
-        assert "normalized method shares and method-mix entropy" in report_text
-        assert len(outputs["extra_images"]) == 6
+        assert "mean run length, sequence entropy, BOCPD change evidence, HMM and semi-Markov state persistence, and local dispersion" in report_text
+        assert "SMM high share" in report_text
+        assert "SMM switch" in report_text
+        assert "SMM mean run" in report_text
+        assert "HMM high share" in report_text
+        assert "HMM switch" in report_text
+        assert "HMM mean run" in report_text
+        assert len(outputs["extra_images"]) == 8
         for image_path, _ in outputs["extra_images"]:
             assert Path(image_path).exists()
 
@@ -339,3 +607,28 @@ def test_augment_transition_case_metrics_normalizes_method_mix():
     assert out.loc[0, "transition_share_epoch_folding"] == 0.0
     assert out.loc[0, "transition_dominant_method_share"] == 2 / 3
     assert 0.0 <= out.loc[0, "transition_method_entropy"] <= 1.0
+
+
+def test_partition_comparative_feature_blocks_separates_temporal_phase_and_auxiliary():
+    blocks, auxiliary = _partition_comparative_feature_blocks(
+        [
+            "median_dt_s",
+            "local_variation",
+            "phase_kuramoto_r",
+            "phase_inlier_ratio",
+            "amplitude_balance_ratio",
+            "mean_peak_v",
+            "n_events",
+        ]
+    )
+
+    assert blocks["temporal"] == ["median_dt_s", "local_variation"]
+    assert blocks["phase_prpd"] == ["phase_kuramoto_r", "phase_inlier_ratio", "amplitude_balance_ratio"]
+    assert blocks["fused"] == [
+        "median_dt_s",
+        "local_variation",
+        "phase_kuramoto_r",
+        "phase_inlier_ratio",
+        "amplitude_balance_ratio",
+    ]
+    assert auxiliary == ["mean_peak_v", "n_events"]

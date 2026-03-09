@@ -30,6 +30,30 @@ def test_load_csv_valid():
         os.unlink(f_path)
 
 
+def test_load_csv_can_return_ingestion_diagnostics():
+    from deltapd.loader import load_empirical_signal
+
+    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w", encoding="utf-8") as f:
+        f.write("time,voltage\n0.0,0.1\n1e-9,0.2\n2e-9,0.0\n")
+        f_path = f.name
+
+    try:
+        signal, fs, diagnostics = load_empirical_signal(
+            f_path,
+            preserve_amplitude=True,
+            include_diagnostics=True,
+        )
+        assert len(signal) == 3
+        assert fs > 0
+        assert diagnostics["file_type"] == "csv"
+        assert diagnostics["loader_mode"] == "generic_csv"
+        assert diagnostics["signal_column_label"] == "voltage"
+        assert diagnostics["time_column_label"] == "time"
+        assert diagnostics["fs_source"] == "time_axis"
+    finally:
+        os.unlink(f_path)
+
+
 def test_load_nonexistent_file_raises():
     """Loader should raise on missing file."""
     from deltapd.loader import load_empirical_signal
@@ -117,5 +141,32 @@ def test_load_keysight_segmented_csv_reconstructs_segment_offsets_when_time_colu
         assert np.isclose(fs, 1e9)
         assert times[4] > 0.19
         assert np.isclose(times[4], 0.199999999)
+    finally:
+        os.unlink(f_path)
+
+
+def test_load_generic_semicolon_csv_with_decimal_commas_and_sample_rate_metadata():
+    from deltapd.loader import load_empirical_signal
+
+    lines = [
+        "Instrument;ScopeX",
+        "Sample Rate;2,0E+09",
+        "Index;Voltage",
+        "0;0,10",
+        "1;0,40",
+        "2;-0,20",
+        "3;0,00",
+    ]
+
+    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+        f_path = f.name
+
+    try:
+        signal, fs = load_empirical_signal(f_path, preserve_amplitude=True)
+        assert len(signal) == 4
+        assert np.isclose(fs, 2.0e9)
+        assert np.isclose(signal.mean(), 0.0)
+        assert np.isclose(signal[1], 0.325)
     finally:
         os.unlink(f_path)

@@ -9,7 +9,15 @@ import numpy as np
 import pandas as pd
 import yaml
 
-from deltapd.campaign.descriptor_study import run_descriptor_study
+from deltapd.campaign.descriptor_study import (
+    _ensure_task_labels,
+    _recommend_subset,
+    _task_primary_metric,
+    evaluate_univariate_descriptors,
+    exhaustive_feature_search,
+    forward_feature_selection,
+    run_descriptor_study,
+)
 from deltapd.campaign.pdf_reports import build_descriptor_study_pdf
 
 
@@ -35,8 +43,60 @@ TRANSITION_METHOD_ORDER = [
     "coherence",
     "harmonic_power",
     "epoch_folding",
+    "h_test",
+    "pdm",
     "gregory_loredo",
     "phase_distance_correlation",
+]
+
+COMPARATIVE_BLOCK_ORDER = ["temporal", "phase_prpd", "fused"]
+COMPARATIVE_BLOCK_LABELS = {
+    "temporal": "Temporal only",
+    "phase_prpd": "Phase/PRPD only",
+    "fused": "Temporal + Phase",
+}
+SEMICYCLE_BLOCK_ORDER = ["negative", "positive", "both"]
+SEMICYCLE_BLOCK_LABELS = {
+    "negative": "Negative semicycle",
+    "positive": "Positive semicycle",
+    "both": "Both semicycles",
+}
+TEMPORAL_FEATURE_NAMES = {
+    "median_dt_s",
+    "iqr_dt_s",
+    "p90_dt_s",
+    "cv_dt",
+    "cv2_dt",
+    "local_variation",
+    "weibull_beta",
+    "burstiness",
+    "fano_factor",
+}
+PHASE_PRPD_FEATURE_NAMES = {
+    "phase_inlier_ratio",
+    "amplitude_balance_ratio",
+}
+SEMICYCLE_NEGATIVE_FEATURES = [
+    "phase_neg_min_deg",
+    "phase_neg_q25_deg",
+    "phase_neg_median_deg",
+    "phase_neg_q75_deg",
+    "phase_neg_max_deg",
+    "phase_neg_mean_deg",
+    "phase_neg_skewness",
+    "phase_neg_kurtosis",
+    "phase_neg_count",
+]
+SEMICYCLE_POSITIVE_FEATURES = [
+    "phase_pos_min_deg",
+    "phase_pos_q25_deg",
+    "phase_pos_median_deg",
+    "phase_pos_q75_deg",
+    "phase_pos_max_deg",
+    "phase_pos_mean_deg",
+    "phase_pos_skewness",
+    "phase_pos_kurtosis",
+    "phase_pos_count",
 ]
 
 
@@ -74,6 +134,259 @@ def _format_feature_list(features: list[str]) -> str:
 def _format_counts(counts: dict[str, Any]) -> str:
     ordered = sorted(counts.items(), key=lambda item: (-int(item[1]), str(item[0])))
     return ", ".join(f"{label}={count}" for label, count in ordered)
+
+
+def _is_temporal_feature(feature: str) -> bool:
+    return feature in TEMPORAL_FEATURE_NAMES or feature.endswith("_dt_s")
+
+
+def _is_phase_prpd_feature(feature: str) -> bool:
+    return feature.startswith("phase_") or feature in PHASE_PRPD_FEATURE_NAMES
+
+
+def _has_numeric_variation(df: pd.DataFrame, feature: str) -> bool:
+    if feature not in df.columns:
+        return False
+    numeric = pd.to_numeric(df[feature], errors="coerce").dropna()
+    return not numeric.empty and int(numeric.nunique()) > 1
+
+
+def _partition_comparative_feature_blocks(feature_bank: list[str]) -> tuple[dict[str, list[str]], list[str]]:
+    temporal: list[str] = []
+    phase_prpd: list[str] = []
+    auxiliary: list[str] = []
+    for feature in feature_bank:
+        if _is_phase_prpd_feature(feature):
+            phase_prpd.append(feature)
+        elif _is_temporal_feature(feature):
+            temporal.append(feature)
+        else:
+            auxiliary.append(feature)
+    return {
+        "temporal": temporal,
+        "phase_prpd": phase_prpd,
+        "fused": temporal + phase_prpd,
+    }, auxiliary
+
+
+def _run_feature_block_ablation(
+    df_windows: pd.DataFrame,
+    *,
+    tasks_cfg: dict[str, dict[str, Any]],
+    feature_bank: list[str],
+    n_splits: int,
+    seed: int,
+    top_k_features: int,
+    max_combo_size: int,
+    forward_max_features: int,
+    tolerance: float,
+) -> dict[str, Any]:
+    block_features, auxiliary_features = _partition_comparative_feature_blocks(feature_bank)
+    rows: list[dict[str, Any]] = []
+
+    for task_name, task_cfg in tasks_cfg.items():
+        task_type = str(task_cfg.get("type", "multiclass"))
+        task_df, label_column, positive_values, label_note = _ensure_task_labels(
+            df_windows,
+            task_name,
+            task_cfg,
+        )
+        for block_name in COMPARATIVE_BLOCK_ORDER:
+            available_features = [
+                feature
+                for feature in block_features.get(block_name, [])
+                if _has_numeric_variation(task_df, feature)
+            ]
+            base_row = {
+                "task_name": task_name,
+                "task_type": task_type,
+                "label_column": label_column,
+                "label_note": label_note,
+                "block_name": block_name,
+                "block_label": COMPARATIVE_BLOCK_LABELS[block_name],
+                "available_features": available_features,
+                "candidate_features": [],
+                "n_available_features": int(len(available_features)),
+                "primary_metric": _task_primary_metric(task_type),
+                "strategy": "",
+                "features": [],
+                "subset_size": 0,
+                "primary_score": float("nan"),
+                "balanced_accuracy": float("nan"),
+            }
+            if not available_features:
+                rows.append(base_row)
+                continue
+
+            univariate_df = evaluate_univariate_descriptors(
+                task_df,
+                available_features,
+                label_column=label_column,
+                task_type=task_type,
+                positive_values=positive_values,
+                n_splits=n_splits,
+                seed=seed,
+            )
+            ranked_features = univariate_df["feature"].tolist()
+            candidate_features = ranked_features[: min(top_k_features, len(ranked_features))]
+            exhaustive_df = exhaustive_feature_search(
+                task_df,
+                candidate_features,
+                label_column=label_column,
+                task_type=task_type,
+                positive_values=positive_values,
+                n_splits=n_splits,
+                seed=seed,
+                max_combo_size=max_combo_size,
+            )
+            forward_df = forward_feature_selection(
+                task_df,
+                candidate_features,
+                label_column=label_column,
+                task_type=task_type,
+                positive_values=positive_values,
+                n_splits=n_splits,
+                seed=seed,
+                max_features=forward_max_features,
+            )
+            recommendation = _recommend_subset(
+                univariate_df,
+                exhaustive_df,
+                forward_df,
+                task_type=task_type,
+                tolerance=tolerance,
+            )
+            row = base_row.copy()
+            row["candidate_features"] = candidate_features
+            if recommendation:
+                row.update(
+                    {
+                        "strategy": str(recommendation.get("strategy", "")),
+                        "features": list(recommendation.get("features", [])),
+                        "subset_size": int(recommendation.get("subset_size", 0) or 0),
+                        "primary_score": float(recommendation.get("primary_score", float("nan"))),
+                        "balanced_accuracy": float(recommendation.get("balanced_accuracy", float("nan"))),
+                    }
+                )
+            rows.append(row)
+
+    ablation_df = pd.DataFrame(rows)
+    return {
+        "results": ablation_df,
+        "block_features": block_features,
+        "auxiliary_features": auxiliary_features,
+    }
+
+
+def _semicycle_feature_blocks() -> dict[str, list[str]]:
+    return {
+        "negative": list(SEMICYCLE_NEGATIVE_FEATURES),
+        "positive": list(SEMICYCLE_POSITIVE_FEATURES),
+        "both": list(SEMICYCLE_NEGATIVE_FEATURES) + list(SEMICYCLE_POSITIVE_FEATURES),
+    }
+
+
+def _run_semicycle_phase_ablation(
+    df_windows: pd.DataFrame,
+    *,
+    tasks_cfg: dict[str, dict[str, Any]],
+    n_splits: int,
+    seed: int,
+    top_k_features: int,
+    max_combo_size: int,
+    forward_max_features: int,
+    tolerance: float,
+) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    block_features = _semicycle_feature_blocks()
+
+    for task_name, task_cfg in tasks_cfg.items():
+        task_type = str(task_cfg.get("type", "multiclass"))
+        task_df, label_column, positive_values, label_note = _ensure_task_labels(
+            df_windows,
+            task_name,
+            task_cfg,
+        )
+        for block_name in SEMICYCLE_BLOCK_ORDER:
+            available_features = [
+                feature
+                for feature in block_features.get(block_name, [])
+                if _has_numeric_variation(task_df, feature)
+            ]
+            base_row = {
+                "task_name": task_name,
+                "task_type": task_type,
+                "label_column": label_column,
+                "label_note": label_note,
+                "block_name": block_name,
+                "block_label": SEMICYCLE_BLOCK_LABELS[block_name],
+                "available_features": available_features,
+                "candidate_features": [],
+                "n_available_features": int(len(available_features)),
+                "primary_metric": _task_primary_metric(task_type),
+                "strategy": "",
+                "features": [],
+                "subset_size": 0,
+                "primary_score": float("nan"),
+                "balanced_accuracy": float("nan"),
+            }
+            if not available_features:
+                rows.append(base_row)
+                continue
+
+            univariate_df = evaluate_univariate_descriptors(
+                task_df,
+                available_features,
+                label_column=label_column,
+                task_type=task_type,
+                positive_values=positive_values,
+                n_splits=n_splits,
+                seed=seed,
+            )
+            ranked_features = univariate_df["feature"].tolist()
+            candidate_features = ranked_features[: min(top_k_features, len(ranked_features))]
+            exhaustive_df = exhaustive_feature_search(
+                task_df,
+                candidate_features,
+                label_column=label_column,
+                task_type=task_type,
+                positive_values=positive_values,
+                n_splits=n_splits,
+                seed=seed,
+                max_combo_size=max_combo_size,
+            )
+            forward_df = forward_feature_selection(
+                task_df,
+                candidate_features,
+                label_column=label_column,
+                task_type=task_type,
+                positive_values=positive_values,
+                n_splits=n_splits,
+                seed=seed,
+                max_features=forward_max_features,
+            )
+            recommendation = _recommend_subset(
+                univariate_df,
+                exhaustive_df,
+                forward_df,
+                task_type=task_type,
+                tolerance=tolerance,
+            )
+            row = base_row.copy()
+            row["candidate_features"] = candidate_features
+            if recommendation:
+                row.update(
+                    {
+                        "strategy": str(recommendation.get("strategy", "")),
+                        "features": list(recommendation.get("features", [])),
+                        "subset_size": int(recommendation.get("subset_size", 0) or 0),
+                        "primary_score": float(recommendation.get("primary_score", float("nan"))),
+                        "balanced_accuracy": float(recommendation.get("balanced_accuracy", float("nan"))),
+                    }
+                )
+            rows.append(row)
+
+    return pd.DataFrame(rows)
 
 
 def build_comparative_event_table(
@@ -285,6 +598,57 @@ def _augment_transition_case_metrics(df: pd.DataFrame) -> pd.DataFrame:
         "max_abs_local_freq_offset_hz",
         "mean_abs_local_freq_offset_hz",
         "mean_local_common_axial_confidence",
+        "local_freq_offset_std_hz",
+        "local_common_axial_confidence_std",
+        "local_method_switch_count",
+        "local_method_switch_rate",
+        "local_regime_run_count",
+        "local_regime_mean_run_length",
+        "local_regime_max_run_length",
+        "local_regime_persistence_ratio",
+        "local_regime_transition_entropy",
+        "local_offset_sign_switch_count",
+        "local_offset_sign_switch_rate",
+        "local_abs_offset_step_mean_hz",
+        "local_abs_offset_step_max_hz",
+        "local_abs_confidence_step_mean",
+        "local_abs_confidence_step_max",
+        "bocpd_max_change_prob",
+        "bocpd_mean_change_prob",
+        "bocpd_run_length_mean",
+        "bocpd_run_length_min",
+        "bocpd_change_count",
+        "bocpd_surprise_score",
+        "hmm_high_state_share",
+        "hmm_high_state_prob_mean",
+        "hmm_state_switch_count",
+        "hmm_state_switch_rate",
+        "hmm_state_mean_run_length",
+        "hmm_state_persistence_ratio",
+        "hmm_state_entropy",
+        "semi_markov_high_state_share",
+        "semi_markov_state_switch_count",
+        "semi_markov_state_switch_rate",
+        "semi_markov_state_mean_run_length",
+        "semi_markov_state_persistence_ratio",
+        "semi_markov_state_entropy",
+        "semi_markov_segment_count",
+        "semi_markov_short_run_count",
+        "semi_markov_duration_surprise_mean",
+        "transition_method_entropy",
+        "transition_dominant_method_share",
+        "tfa_wavelet_entropy_mean",
+        "tfa_wavelet_entropy_max",
+        "tfa_wavelet_dominant_band_unique_count",
+        "tfa_wavelet_dominant_band_entropy",
+        "tfa_wavelet_dominant_band_switch_count",
+        "tfa_wavelet_dominant_band_switch_rate",
+        "tfa_wavelet_detail_entropy_mean",
+        "tfa_wavelet_detail_entropy_max",
+        "tfa_wavelet_detail_dominant_band_unique_count",
+        "tfa_wavelet_detail_dominant_band_entropy",
+        "tfa_wavelet_detail_dominant_band_switch_count",
+        "tfa_wavelet_detail_dominant_band_switch_rate",
     ] + count_cols
     for col in numeric_cols:
         if col in work.columns:
@@ -339,21 +703,31 @@ def _default_transition_features(df: pd.DataFrame) -> list[str]:
 
     features = [
         "max_abs_local_freq_offset_hz",
-        "mean_abs_local_freq_offset_hz",
+        "local_freq_offset_std_hz",
         "mean_local_common_axial_confidence",
-        "n_unique_local_methods",
+        "local_common_axial_confidence_std",
         "transition_method_entropy",
+        "local_regime_transition_entropy",
+        "semi_markov_high_state_share",
+        "semi_markov_state_mean_run_length",
+        "semi_markov_state_switch_rate",
+        "semi_markov_state_entropy",
+        "hmm_high_state_share",
+        "hmm_state_mean_run_length",
+        "bocpd_max_change_prob",
+        "bocpd_run_length_mean",
+        "bocpd_surprise_score",
+        "local_method_switch_rate",
+        "local_regime_mean_run_length",
+        "local_offset_sign_switch_rate",
         "transition_dominant_method_share",
     ]
-    features.extend(
-        col.replace("transition_count_", "transition_share_")
-        for col in _ordered_transition_count_columns(df)
-    )
-    return [
+    selected = [
         feature
         for feature in features
         if feature in df.columns and _has_variation(df[feature])
     ]
+    return selected[:8]
 
 
 def _binary_confusion(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
@@ -509,6 +883,209 @@ def _plot_transition_case_scatter(df: pd.DataFrame, *, output_path: Path) -> Pat
     return output_path
 
 
+def _plot_block_ablation_heatmap(
+    df: pd.DataFrame,
+    *,
+    output_path: Path,
+) -> Path | None:
+    if df.empty:
+        return None
+    work = df.copy()
+    if "balanced_accuracy" not in work.columns:
+        return None
+    matrix = (
+        work.pivot(index="task_name", columns="block_label", values="balanced_accuracy")
+        .reindex(index=["dataset6", "type3", "variant2"], columns=[COMPARATIVE_BLOCK_LABELS[name] for name in COMPARATIVE_BLOCK_ORDER])
+        .dropna(how="all")
+    )
+    if matrix.empty:
+        return None
+    fig, ax = plt.subplots(figsize=(6.8, 2.8 + 0.55 * len(matrix.index)))
+    im = ax.imshow(matrix.to_numpy(dtype=float), aspect="auto", cmap="YlGnBu", vmin=0.0, vmax=1.0)
+    ax.set_xticks(range(len(matrix.columns)))
+    ax.set_xticklabels(matrix.columns.tolist(), rotation=20, ha="right")
+    ax.set_yticks(range(len(matrix.index)))
+    ax.set_yticklabels(matrix.index.tolist())
+    ax.set_title("Strict block ablation by balanced accuracy")
+    for row_idx, task_name in enumerate(matrix.index.tolist()):
+        for col_idx, block_label in enumerate(matrix.columns.tolist()):
+            value = matrix.iloc[row_idx, col_idx]
+            if np.isfinite(value):
+                ax.text(col_idx, row_idx, f"{value:.3f}", ha="center", va="center", fontsize=9, color="#102a43")
+    fig.colorbar(im, ax=ax, fraction=0.04, pad=0.03, label="balanced_accuracy")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+    return output_path
+
+
+def _plot_semicycle_ablation_heatmap(
+    df: pd.DataFrame,
+    *,
+    output_path: Path,
+) -> Path | None:
+    if df.empty or "balanced_accuracy" not in df.columns:
+        return None
+    matrix = (
+        df.pivot(index="task_name", columns="block_label", values="balanced_accuracy")
+        .reindex(
+            index=["dataset6", "type3", "variant2"],
+            columns=[SEMICYCLE_BLOCK_LABELS[name] for name in SEMICYCLE_BLOCK_ORDER],
+        )
+        .dropna(how="all")
+    )
+    if matrix.empty:
+        return None
+    fig, ax = plt.subplots(figsize=(7.0, 2.8 + 0.55 * len(matrix.index)))
+    im = ax.imshow(matrix.to_numpy(dtype=float), aspect="auto", cmap="YlOrBr", vmin=0.0, vmax=1.0)
+    ax.set_xticks(range(len(matrix.columns)))
+    ax.set_xticklabels(matrix.columns.tolist(), rotation=20, ha="right")
+    ax.set_yticks(range(len(matrix.index)))
+    ax.set_yticklabels(matrix.index.tolist())
+    ax.set_title("Semicycle PRPD ablation by balanced accuracy")
+    for row_idx in range(len(matrix.index)):
+        for col_idx in range(len(matrix.columns)):
+            value = matrix.iloc[row_idx, col_idx]
+            if np.isfinite(value):
+                ax.text(col_idx, row_idx, f"{value:.3f}", ha="center", va="center", fontsize=9, color="#40210f")
+    fig.colorbar(im, ax=ax, fraction=0.04, pad=0.03, label="balanced_accuracy")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+    return output_path
+
+
+def _build_block_ablation_section(
+    block_ablation_df: pd.DataFrame | None,
+    *,
+    auxiliary_features: list[str] | None = None,
+) -> str:
+    if block_ablation_df is None or block_ablation_df.empty:
+        return ""
+
+    lines = [
+        "## 4. Strict block ablation",
+        "",
+        "This section re-runs the same comparative evaluator under three constrained feature banks:",
+        "",
+        "- `Temporal only`: inter-pulse timing statistics only.",
+        "- `Phase/PRPD only`: blind phase concentration, width, and symmetry descriptors only.",
+        "- `Temporal + Phase`: union of the two previous banks.",
+        "",
+    ]
+    if auxiliary_features:
+        lines.append(
+            "Reserve-only auxiliary features excluded from this strict comparison: "
+            + ", ".join(f"`{feature}`" for feature in auxiliary_features)
+            + "."
+        )
+        lines.append("")
+
+    lines.extend(
+        [
+            "| Task | Block | Features | Primary metric | Primary score | Balanced acc. | Strategy |",
+            "| --- | --- | --- | --- | ---: | ---: | --- |",
+        ]
+    )
+    task_order = ["dataset6", "type3", "variant2"]
+    block_order = {name: idx for idx, name in enumerate(COMPARATIVE_BLOCK_ORDER)}
+    work = block_ablation_df.copy()
+    work["block_order"] = work["block_name"].map(block_order).fillna(len(block_order))
+    work = work.sort_values(by=["task_name", "block_order"]).reset_index(drop=True)
+    for _, row in work.iterrows():
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    str(row.get("task_name", "")),
+                    str(row.get("block_label", "")),
+                    _format_feature_list(list(row.get("features", []))),
+                    str(row.get("primary_metric", "")),
+                    _format_score(row.get("primary_score")),
+                    _format_score(row.get("balanced_accuracy")),
+                    str(row.get("strategy", "")),
+                ]
+            )
+            + " |"
+        )
+    lines.append("")
+
+    for task_name in task_order:
+        task_rows = work[work["task_name"] == task_name].copy()
+        if task_rows.empty:
+            continue
+        task_rows["primary_score_num"] = pd.to_numeric(task_rows["primary_score"], errors="coerce")
+        task_rows["balanced_accuracy_num"] = pd.to_numeric(task_rows["balanced_accuracy"], errors="coerce")
+        task_rows = task_rows.sort_values(
+            by=["primary_score_num", "balanced_accuracy_num", "block_order"],
+            ascending=[False, False, True],
+        )
+        best_row = task_rows.iloc[0]
+        lines.append(
+            f"- `{task_name}`: best strict block = `{best_row['block_label']}` with "
+            f"`{best_row['primary_metric']} = {_format_score(best_row['primary_score'])}` and "
+            f"`balanced_accuracy = {_format_score(best_row['balanced_accuracy'])}` using "
+            f"`{_format_feature_list(list(best_row.get('features', [])))}`."
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _build_semicycle_ablation_section(semicycle_ablation_df: pd.DataFrame | None) -> str:
+    if semicycle_ablation_df is None or semicycle_ablation_df.empty:
+        return ""
+
+    lines = [
+        "## 4b. Semicycle PRPD baseline",
+        "",
+        "This benchmark isolates simple PRPD statistics by semicycle, motivated by recent UHF-conditioned PRPD literature.",
+        "The feature bank is intentionally simple and interpretable: `min`, `q25`, `median`, `q75`, `max`, `mean`, `skewness`, `kurtosis`, and `count` per semicycle.",
+        "",
+        "| Task | Block | Features | Primary metric | Primary score | Balanced acc. | Strategy |",
+        "| --- | --- | --- | --- | ---: | ---: | --- |",
+    ]
+    work = semicycle_ablation_df.copy()
+    order = {name: idx for idx, name in enumerate(SEMICYCLE_BLOCK_ORDER)}
+    work["block_order"] = work["block_name"].map(order).fillna(len(order))
+    work = work.sort_values(by=["task_name", "block_order"]).reset_index(drop=True)
+    for _, row in work.iterrows():
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    str(row.get("task_name", "")),
+                    str(row.get("block_label", "")),
+                    _format_feature_list(list(row.get("features", []))),
+                    str(row.get("primary_metric", "")),
+                    _format_score(row.get("primary_score")),
+                    _format_score(row.get("balanced_accuracy")),
+                    str(row.get("strategy", "")),
+                ]
+            )
+            + " |"
+        )
+    lines.append("")
+    for task_name in ["dataset6", "type3", "variant2"]:
+        task_rows = work[work["task_name"] == task_name].copy()
+        if task_rows.empty:
+            continue
+        task_rows["primary_score_num"] = pd.to_numeric(task_rows["primary_score"], errors="coerce")
+        task_rows["balanced_accuracy_num"] = pd.to_numeric(task_rows["balanced_accuracy"], errors="coerce")
+        task_rows = task_rows.sort_values(
+            by=["primary_score_num", "balanced_accuracy_num", "block_order"],
+            ascending=[False, False, True],
+        )
+        best_row = task_rows.iloc[0]
+        lines.append(
+            f"- `{task_name}`: best semicycle block = `{best_row['block_label']}` with "
+            f"`{best_row['primary_metric']} = {_format_score(best_row['primary_score'])}` and "
+            f"`balanced_accuracy = {_format_score(best_row['balanced_accuracy'])}` using "
+            f"`{_format_feature_list(list(best_row.get('features', [])))}`."
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
 def _build_comparative_markdown(
     *,
     output_dir: Path,
@@ -518,6 +1095,9 @@ def _build_comparative_markdown(
     df_events: pd.DataFrame,
     df_windows: pd.DataFrame,
     blind_metrics_df: pd.DataFrame | None = None,
+    block_ablation_df: pd.DataFrame | None = None,
+    block_auxiliary_features: list[str] | None = None,
+    semicycle_ablation_df: pd.DataFrame | None = None,
     transition_case_df: pd.DataFrame | None = None,
     transition_eval: dict[str, Any] | None = None,
 ) -> Path:
@@ -561,6 +1141,18 @@ def _build_comparative_markdown(
             + "\n\n"
         )
 
+    block_ablation_section = _build_block_ablation_section(
+        block_ablation_df,
+        auxiliary_features=block_auxiliary_features,
+    )
+    block_ablation_figure_section = ""
+    if block_ablation_section:
+        block_ablation_figure_section = "### Strict block ablation\n\n![](comparative_block_ablation.png)\n\n"
+    semicycle_ablation_section = _build_semicycle_ablation_section(semicycle_ablation_df)
+    semicycle_ablation_figure_section = ""
+    if semicycle_ablation_section:
+        semicycle_ablation_figure_section = "### Semicycle PRPD baseline\n\n![](comparative_semicycle_ablation.png)\n\n"
+
     transition_section = ""
     if transition_case_df is not None and not transition_case_df.empty:
         rows = []
@@ -574,6 +1166,24 @@ def _build_comparative_markdown(
                         str(int(row.get("n_transition_windows", 0) or 0)),
                         str(int(row.get("n_ranked_transition_candidates", 0) or 0)),
                         str(int(row.get("n_unique_local_methods", 0) or 0)),
+                        _format_score(row.get("transition_method_entropy")),
+                        _format_score(row.get("local_method_switch_rate")),
+                        _format_score(row.get("local_regime_transition_entropy")),
+                        _format_score(row.get("local_regime_mean_run_length")),
+                        _format_score(row.get("bocpd_max_change_prob")),
+                        _format_score(row.get("bocpd_run_length_mean")),
+                        _format_score(row.get("bocpd_surprise_score")),
+                        _format_score(row.get("semi_markov_high_state_share")),
+                        _format_score(row.get("semi_markov_state_switch_rate")),
+                        _format_score(row.get("semi_markov_state_mean_run_length")),
+                        _format_score(row.get("hmm_high_state_share")),
+                        _format_score(row.get("hmm_state_switch_rate")),
+                        _format_score(row.get("hmm_state_mean_run_length")),
+                        _format_score(row.get("local_offset_sign_switch_rate")),
+                        _format_score(row.get("tfa_wavelet_entropy_mean")),
+                        str(int(row.get("tfa_wavelet_dominant_band_unique_count", 0) or 0)),
+                        _format_score(row.get("tfa_wavelet_detail_entropy_mean")),
+                        str(int(row.get("tfa_wavelet_detail_dominant_band_unique_count", 0) or 0)),
                         str(row.get("dominant_local_method", "")),
                         _format_score(row.get("max_abs_local_freq_offset_hz")),
                         _format_score(row.get("mean_local_common_axial_confidence")),
@@ -584,18 +1194,19 @@ def _build_comparative_markdown(
                 + " |"
             )
         transition_section = (
-            "## 4. Exploratory case-level transition metrics\n\n"
+            "### Exploratory case-level transition metrics\n\n"
             "This block uses one summary row per dataset from the within-test `state/alarm` pipeline. "
             "It is exploratory because `n=6`, so it should not be sold as the primary result. "
             "Transition-family counts below are deduplicated by matched local blind-PRPD window; "
             "`ranked candidates` is shown separately because several nearby candidates can land on the same local regime.\n\n"
-            "| Dataset | Type | Local windows | Ranked candidates | Unique local methods | Dominant local method | Max abs offset (Hz) | Mean local conf. | State score | Alarm score |\n"
-            "| --- | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: |\n"
+            "| Dataset | Type | Local windows | Ranked candidates | Unique local methods | Method entropy | Switch rate | Seq. entropy | Mean run | BOCPD max change | BOCPD mean run | BOCPD surprise | SMM high share | SMM switch | SMM mean run | HMM high share | HMM switch | HMM mean run | Sign-switch rate | Wavelet H mean | Wavelet band diversity | Wavelet detail H | Wavelet detail diversity | Dominant local method | Max abs offset (Hz) | Mean local conf. | State score | Alarm score |\n"
+            "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: |\n"
             + "\n".join(rows)
             + "\n\n"
         )
         transition_section += (
             "The exploratory nearest-centroid check below uses normalized method shares and method-mix entropy, "
+            "plus sequence-stability metrics such as switch rate, mean run length, sequence entropy, BOCPD change evidence, HMM and semi-Markov state persistence, and local dispersion, "
             "not raw transition counts, so that the comparison is less sensitive to case length.\n\n"
         )
         if transition_eval:
@@ -642,7 +1253,7 @@ Important reading rule:
 - `delta t` is physical inter-pulse time **inside each acquisition**;
 - this comparative study uses distributions of windows across datasets, not a single global timeline joining all six experiments.
 
-{blind_section}## 4. Main findings
+{blind_section}{block_ablation_section}{semicycle_ablation_section}## 5. Main findings
 
 ### Type separation (`type3`)
 
@@ -687,7 +1298,7 @@ Technical reading:
 - `mean_peak_v` dominates this task, so the twin/benchmark difference is not purely temporal;
 - `weibull_beta` and `p90_dt_s` indicate that the tail and shape of `delta t` still contribute once amplitude is included.
 
-## 5. What descriptors are doing physically
+## 6. What descriptors are doing physically
 
 - `p90_dt_s`: alerts when long gaps between pulses begin to stretch or compress.
 - `median_dt_s`: tracks the central pulse cadence.
@@ -696,26 +1307,26 @@ Technical reading:
 - `phase_kuramoto_r`: measures how strongly the blind PRPD clusters around preferred phase sectors.
 - `mean_peak_v`: adds pulse severity, not just pulse timing.
 
-## 6. What not to conclude yet
+## 7. What not to conclude yet
 
 - This comparative study is strong evidence for descriptor usefulness, but it is not yet a final alarm model.
 - The best `type3` subset proves discriminatory power across experiments; it does not by itself prove chronological damage progression inside one single specimen.
 - For alarm/state publication, the next study must remain separate and be run within each long-duration acquisition.
 - The case-level transition block is only exploratory because there are just six datasets.
 
-## 7. Immediate thesis direction
+## 8. Immediate thesis direction
 
 - Use `p90_dt_s + local_variation + phase_kuramoto_r` as the comparative baseline for discharge type.
 - Use the within-test state pipeline separately for alarm and regime-change detection.
 - Keep `wavelet` available as preprocessing for raw 1-D traces, but do not force it into every comparative experiment if the event table is already stable.
 
-## 8. Figures
+## 9. Figures
 
 ### Dataset count overview
 
 ![](comparative_window_counts.png)
 
-### Type-separation descriptor distributions
+{block_ablation_figure_section}{semicycle_ablation_figure_section}### Type-separation descriptor distributions
 
 ![](comparative_type3_boxplots.png)
 
@@ -738,6 +1349,9 @@ def _build_comparative_artifacts(
     channel: str,
     dataset_keys: list[str],
     blind_metrics_df: pd.DataFrame | None = None,
+    block_ablation_df: pd.DataFrame | None = None,
+    block_auxiliary_features: list[str] | None = None,
+    semicycle_ablation_df: pd.DataFrame | None = None,
     transition_case_df: pd.DataFrame | None = None,
     transition_eval: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -773,6 +1387,14 @@ def _build_comparative_artifacts(
         features=dataset_features,
         output_path=output_dir / "comparative_dataset6_heatmap.png",
     )
+    block_ablation_png = _plot_block_ablation_heatmap(
+        block_ablation_df if block_ablation_df is not None else pd.DataFrame(),
+        output_path=output_dir / "comparative_block_ablation.png",
+    )
+    semicycle_ablation_png = _plot_semicycle_ablation_heatmap(
+        semicycle_ablation_df if semicycle_ablation_df is not None else pd.DataFrame(),
+        output_path=output_dir / "comparative_semicycle_ablation.png",
+    )
     transition_heatmap_png = None
     transition_scatter_png = None
     if transition_case_df is not None and not transition_case_df.empty:
@@ -794,11 +1416,16 @@ def _build_comparative_artifacts(
         df_events=df_events,
         df_windows=df_windows,
         blind_metrics_df=blind_metrics_df,
+        block_ablation_df=block_ablation_df,
+        block_auxiliary_features=block_auxiliary_features,
+        semicycle_ablation_df=semicycle_ablation_df,
         transition_case_df=transition_case_df,
         transition_eval=transition_eval,
     )
     extra_images = [
         (window_counts_png, "Dataset count overview"),
+        (block_ablation_png, "Strict block ablation"),
+        (semicycle_ablation_png, "Semicycle PRPD baseline"),
         (type_boxplot_png, "Type-separation descriptor distributions"),
         (variant_boxplot_png, "Benchmark-vs-gemela descriptor distributions"),
         (heatmap_png, "Dataset-level descriptor heatmap"),
@@ -909,6 +1536,77 @@ def run_comparative_thesis_study(config_path: str | Path) -> dict[str, Any]:
         yaml.safe_dump(descriptor_cfg, f, sort_keys=False, allow_unicode=False)
 
     outputs = run_descriptor_study(generated_cfg_path)
+    df_windows = outputs.get("windows", pd.DataFrame()).copy()
+    search_cfg = descriptor_cfg.get("search", {})
+    descriptor_bank = list(dict.fromkeys(
+        list(descriptor_cfg.get("descriptors", {}).get("search_features", []))
+        + list(descriptor_cfg.get("descriptors", {}).get("reserve_features", []))
+    ))
+    block_ablation_payload = _run_feature_block_ablation(
+        df_windows,
+        tasks_cfg=descriptor_cfg.get("tasks", {}),
+        feature_bank=descriptor_bank,
+        n_splits=int(search_cfg.get("n_splits", 5)),
+        seed=int(search_cfg.get("random_seed", 42)),
+        top_k_features=int(search_cfg.get("top_k_features", 8)),
+        max_combo_size=int(search_cfg.get("max_combo_size", 3)),
+        forward_max_features=int(search_cfg.get("forward_selection_max_features", 5)),
+        tolerance=float(search_cfg.get("score_tolerance", 0.01)),
+    )
+    block_ablation_df = block_ablation_payload["results"]
+    if not block_ablation_df.empty:
+        block_ablation_export = block_ablation_df.copy()
+        for col in ["available_features", "candidate_features", "features"]:
+            if col in block_ablation_export.columns:
+                block_ablation_export[col] = block_ablation_export[col].apply(
+                    lambda values: ",".join(values) if isinstance(values, list) else values
+                )
+        block_ablation_export.to_csv(
+            output_dir / "comparative_block_ablation.csv",
+            index=False,
+            encoding="utf-8-sig",
+        )
+    with (output_dir / "comparative_block_ablation.json").open("w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "blocks": block_ablation_payload["block_features"],
+                "auxiliary_features": block_ablation_payload["auxiliary_features"],
+                "results": json.loads(block_ablation_df.to_json(orient="records")),
+            },
+            f,
+            indent=2,
+        )
+    semicycle_ablation_df = _run_semicycle_phase_ablation(
+        df_windows,
+        tasks_cfg=descriptor_cfg.get("tasks", {}),
+        n_splits=int(search_cfg.get("n_splits", 5)),
+        seed=int(search_cfg.get("random_seed", 42)),
+        top_k_features=int(search_cfg.get("top_k_features", 8)),
+        max_combo_size=int(search_cfg.get("max_combo_size", 3)),
+        forward_max_features=int(search_cfg.get("forward_selection_max_features", 5)),
+        tolerance=float(search_cfg.get("score_tolerance", 0.01)),
+    )
+    if not semicycle_ablation_df.empty:
+        semicycle_export = semicycle_ablation_df.copy()
+        for col in ["available_features", "candidate_features", "features"]:
+            if col in semicycle_export.columns:
+                semicycle_export[col] = semicycle_export[col].apply(
+                    lambda values: ",".join(values) if isinstance(values, list) else values
+                )
+        semicycle_export.to_csv(
+            output_dir / "comparative_semicycle_ablation.csv",
+            index=False,
+            encoding="utf-8-sig",
+        )
+    with (output_dir / "comparative_semicycle_ablation.json").open("w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "blocks": _semicycle_feature_blocks(),
+                "results": json.loads(semicycle_ablation_df.to_json(orient="records")),
+            },
+            f,
+            indent=2,
+        )
     transition_eval = {}
     if transition_case_df is not None and not transition_case_df.empty:
         transition_features = _default_transition_features(transition_case_df)
@@ -931,6 +1629,9 @@ def run_comparative_thesis_study(config_path: str | Path) -> dict[str, Any]:
         channel=channel,
         dataset_keys=dataset_keys,
         blind_metrics_df=blind_metrics_df,
+        block_ablation_df=block_ablation_df,
+        block_auxiliary_features=block_ablation_payload["auxiliary_features"],
+        semicycle_ablation_df=semicycle_ablation_df,
         transition_case_df=transition_case_df,
         transition_eval=transition_eval,
     )
@@ -950,6 +1651,9 @@ def run_comparative_thesis_study(config_path: str | Path) -> dict[str, Any]:
     outputs["comparative_summary_md"] = artifact_outputs["markdown_path"]
     outputs["comparative_images"] = [Path(path) for path, _ in artifact_outputs["extra_images"]]
     outputs["blind_metrics_df"] = blind_metrics_df
+    outputs["block_ablation_df"] = block_ablation_df
+    outputs["block_ablation_auxiliary_features"] = block_ablation_payload["auxiliary_features"]
+    outputs["semicycle_ablation_df"] = semicycle_ablation_df
     outputs["transition_case_df"] = transition_case_df
     outputs["transition_eval"] = transition_eval
     return outputs

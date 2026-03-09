@@ -90,7 +90,7 @@ def run_benchmark(
         "asymmetric_polarity",
         "missing_cycles",
     ]
-    methods = ("coherence", "harmonic_power", "epoch_folding", "gregory_loredo", "auto")
+methods = ("coherence", "harmonic_power", "epoch_folding", "h_test", "pdm", "gregory_loredo", "auto")
     rng = np.random.default_rng(seed)
     rows: list[dict[str, float | int | str]] = []
 
@@ -179,7 +179,9 @@ def run_benchmark(
         "- `coherence`: weighted doubled-phase resultant.",
         "- `harmonic_power`: multi-harmonic doubled-phase concentration.",
         "- `epoch_folding`: folded-phase histogram concentration against uniform occupancy.",
-        "- `gregory_loredo`: Bayesian event folding with piecewise-constant phase-rate bins.",
+    "- `h_test`: axial event periodicity baseline using the weighted Z^2_n / H-test family.",
+    "- `pdm`: axial phase-dispersion minimization baseline for non-sinusoidal clustering.",
+    "- `gregory_loredo`: Bayesian event folding with piecewise-constant phase-rate bins.",
         "- `auto`: selector that compares `coherence`, `harmonic_power`, and `epoch_folding` by axial concentration.",
         "",
         "## Winners by scenario",

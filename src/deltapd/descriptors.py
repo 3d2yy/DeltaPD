@@ -15,6 +15,7 @@ Phase 2 — Variable Isolation:
 from __future__ import annotations
 
 from typing import Any
+import warnings
 
 import numpy as np
 from numpy.typing import NDArray
@@ -25,6 +26,39 @@ from scipy.signal import find_peaks
 # Type aliases
 # ---------------------------------------------------------------------------
 Signal = NDArray[np.floating[Any]]
+AUTO_MIN_SEPARATION_SAMPLES = 5
+
+
+def _resolve_min_separation_s(
+    min_separation_s: float | None,
+    fs: float,
+) -> float:
+    """Resolve the effective refractory time for pulse picking.
+
+    When the caller does not provide a value, use a conservative default of
+    five samples. This avoids single-pulse duplicate picks at high sampling
+    rates without overriding the stricter campaign-level settings.
+    """
+    sampling_hz = float(fs)
+    if not np.isfinite(sampling_hz) or sampling_hz <= 0.0:
+        raise ValueError("Sampling frequency must be finite and positive.")
+
+    auto_min_separation_s = float(AUTO_MIN_SEPARATION_SAMPLES / sampling_hz)
+    if min_separation_s is None:
+        return auto_min_separation_s
+
+    requested = float(min_separation_s)
+    if not np.isfinite(requested):
+        raise ValueError("min_separation_s must be finite or None.")
+    if requested <= 0.0:
+        warnings.warn(
+            "min_separation_s <= 0 disables the physical refractory gap; "
+            f"falling back to the automatic default of {AUTO_MIN_SEPARATION_SAMPLES} samples.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return auto_min_separation_s
+    return requested
 
 
 # ===================================================================
@@ -36,7 +70,7 @@ def detect_pulses(
     signal_data: Signal,
     fs: float,
     threshold_sigma: float = 3.0,
-    min_separation_s: float = 0.0,
+    min_separation_s: float | None = None,
     method: str = "threshold",
 ) -> NDArray[np.intp]:
     """Detect PD pulses in a pre-processed UHF signal.
@@ -50,9 +84,10 @@ def detect_pulses(
     threshold_sigma : float
         Number of standard deviations above the mean used as the peak
         detection threshold (only for ``method='threshold'``).
-    min_separation_s : float
+    min_separation_s : float or None
         Minimum time separation (in seconds) between consecutive pulses.
-        Translated to samples internally.
+        ``None`` uses an automatic refractory gap of five samples. Explicit
+        non-positive values emit a warning and fall back to that same default.
     method : str
         ``'threshold'`` — simple amplitude threshold on the absolute signal.
         ``'scipy_peaks'`` — ``scipy.signal.find_peaks`` with prominence.
@@ -65,7 +100,8 @@ def detect_pulses(
     data = np.asarray(signal_data, dtype=np.float64)
     abs_data = np.abs(data)
 
-    min_distance: int = max(1, int(min_separation_s * fs))
+    effective_min_separation_s = _resolve_min_separation_s(min_separation_s, fs)
+    min_distance: int = max(1, int(np.ceil(effective_min_separation_s * fs)))
 
     if method == "threshold":
         mu = np.mean(abs_data)
@@ -94,7 +130,7 @@ def detect_pulses_cfar(
     cfar_window: int = 64,
     cfar_guard: int = 8,
     pfa: float = 1e-4,
-    min_separation_s: float = 0.0,
+    min_separation_s: float | None = None,
 ) -> NDArray[np.intp]:
     r"""Cell-Averaging Constant False Alarm Rate (CA-CFAR) pulse detector.
 
@@ -126,8 +162,9 @@ def detect_pulses_cfar(
         Number of guard cells on each side of the CUT.
     pfa : float
         Design probability of false alarm.
-    min_separation_s : float
-        Minimum time between detections in seconds.
+    min_separation_s : float or None
+        Minimum time between detections in seconds. ``None`` uses an
+        automatic refractory gap of five samples.
 
     Returns
     -------
@@ -137,23 +174,30 @@ def detect_pulses_cfar(
     data = np.asarray(signal_data, dtype=np.float64)
     power = data**2
     n = len(data)
+    effective_min_separation_s = _resolve_min_separation_s(min_separation_s, fs)
+
+    w = int(cfar_window)
+    g = int(cfar_guard)
+    if w <= 0:
+        raise ValueError("cfar_window must be a positive integer.")
+    if g < 0:
+        raise ValueError("cfar_guard must be non-negative.")
 
     # CFAR threshold factor
-    w = cfar_window
     alpha_cfar = w * (pfa ** (-1.0 / w) - 1.0)
 
-    margin = w + cfar_guard
+    margin = w + g
+    if margin >= n:
+        return np.array([], dtype=np.intp)
+
     detections = np.zeros(n, dtype=bool)
-
-    for k in range(margin, n - margin):
-        # Training cells: [k - margin : k - cfar_guard] and [k + cfar_guard + 1 : k + margin + 1]
-        left = power[k - margin : k - cfar_guard]
-        right = power[k + cfar_guard + 1 : k + margin + 1]
-        noise_est = np.mean(np.concatenate([left, right]))
-        threshold_val = alpha_cfar * noise_est
-
-        if power[k] > threshold_val:
-            detections[k] = True
+    valid_idx = np.arange(margin, n - margin, dtype=np.intp)
+    prefix = np.concatenate(([0.0], np.cumsum(power, dtype=np.float64)))
+    left_sum = prefix[valid_idx - g] - prefix[valid_idx - margin]
+    right_sum = prefix[valid_idx + margin + 1] - prefix[valid_idx + g + 1]
+    noise_est = (left_sum + right_sum) / float(2 * w)
+    threshold_val = alpha_cfar * noise_est
+    detections[valid_idx] = power[valid_idx] > threshold_val
 
     # VERSIÓN OPTIMIZADA: Extracción basada en Primer Frente de Onda (ToA)
     detection_idx = np.flatnonzero(detections)
@@ -161,7 +205,7 @@ def detect_pulses_cfar(
     if len(detection_idx) == 0:
         return np.array([], dtype=np.intp)
         
-    min_distance = max(1, int(min_separation_s * fs))
+    min_distance = max(1, int(np.ceil(effective_min_separation_s * fs)))
     
     # Calcular la distancia en muestras entre detecciones consecutivas
     gaps = np.diff(detection_idx)
@@ -215,7 +259,7 @@ def extract_delta_t_vector(
     signal_data: Signal,
     fs: float,
     threshold_sigma: float = 3.0,
-    min_separation_s: float = 0.0,
+    min_separation_s: float | None = None,
     detection_method: str = "threshold",
 ) -> Signal:
     """Primary descriptor interface — returns a 1-D Δt vector.
@@ -231,8 +275,9 @@ def extract_delta_t_vector(
         Sampling frequency in Hz.
     threshold_sigma : float
         Detection threshold in units of σ.
-    min_separation_s : float
-        Minimum inter-pulse gap in seconds.
+    min_separation_s : float or None
+        Minimum inter-pulse gap in seconds. ``None`` uses an automatic
+        refractory gap of five samples.
     detection_method : str
         ``'threshold'`` or ``'scipy_peaks'``.
 

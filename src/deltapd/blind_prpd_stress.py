@@ -10,7 +10,15 @@ import pandas as pd
 from deltapd.blind_prpd import compare_frequency_estimators
 
 
-METHODS = ("coherence", "harmonic_power", "epoch_folding", "gregory_loredo", "auto")
+METHODS = (
+    "coherence",
+    "harmonic_power",
+    "epoch_folding",
+    "h_test",
+    "pdm",
+    "gregory_loredo",
+    "auto",
+)
 
 
 def _benchmark_output_dir() -> Path:

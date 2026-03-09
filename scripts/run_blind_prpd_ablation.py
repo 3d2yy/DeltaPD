@@ -27,7 +27,7 @@ from deltapd.campaign.state_alarm_batch import (
 from export_thesis_master_table import export_master_tables
 
 
-METHODS = ("coherence", "harmonic_power", "epoch_folding", "gregory_loredo", "auto")
+METHODS = ("coherence", "harmonic_power", "epoch_folding", "h_test", "pdm", "gregory_loredo", "auto")
 
 
 def _repo_root() -> Path:
@@ -81,7 +81,7 @@ def _build_report(
         "",
         "## What this run compares",
         "",
-        f"- Fixed-method blind PRPD calibration on `{channel}` for `coherence`, `harmonic_power`, `epoch_folding`, `gregory_loredo`, and `auto`.",
+    f"- Fixed-method blind PRPD calibration on `{channel}` for `coherence`, `harmonic_power`, `epoch_folding`, `h_test`, `pdm`, `gregory_loredo`, and `auto`.",
         "- Same downstream structure for all methods: `state/alarm` within each test and `type` comparative across `P1/P2/P3/G1/G2/G3`.",
         "",
         "## Type ranking",

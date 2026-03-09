@@ -42,5 +42,5 @@ def test_run_blind_prpd_stress_benchmark_writes_outputs(tmp_path: Path):
 
     summary_df = pd.read_csv(outputs["summary_csv"])
     assert set(summary_df["scenario"]) == {"linear_drift_mild", "segmented_gaps"}
-    assert {"coherence", "harmonic_power", "epoch_folding", "gregory_loredo", "auto"} <= set(summary_df["method"])
+    assert {"coherence", "harmonic_power", "epoch_folding", "h_test", "pdm", "gregory_loredo", "auto"} <= set(summary_df["method"])
     assert "mean_axial_phase_error_deg" in summary_df.columns

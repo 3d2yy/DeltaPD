@@ -66,7 +66,7 @@ def run_real_case_comparison(
         results = compare_frequency_estimators(
             toa,
             peak_weights=peak_v,
-            methods=("coherence", "harmonic_power", "epoch_folding", "gregory_loredo", "auto"),
+        methods=("coherence", "harmonic_power", "epoch_folding", "h_test", "pdm", "gregory_loredo", "auto"),
             n_harmonics=4,
             bootstrap_iterations=bootstrap_iterations,
             bootstrap_sample_fraction=bootstrap_sample_fraction,
