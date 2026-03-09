@@ -2,7 +2,7 @@
 
 DeltaPD is a UHF partial-discharge analysis framework centered on inter-pulse interval (`delta t`) dynamics, blind PRPD reconstruction, and thesis-scale comparative/state studies.
 
-![PRPD example](docs/images/prpd_p1_best.png)
+![Blind PRPD P3](docs/images/blind_prpd_p3_material.png)
 
 ## What the repository covers
 
