@@ -1,0 +1,60 @@
+study_name: "Serie_1_2_MAT_Row_Study"
+
+input:
+  mat_path: "serie_1 (2).mat"
+  signal_key: "serie"
+  time_key: "time"
+  fs_hz: 1.0e9
+
+analysis:
+  center_rows: true
+  threshold_sigma: 4.0
+  min_separation_ns: 20.0
+  active_quantile: 0.99
+  change_top_k: 10
+  change_min_row_gap: 25
+
+descriptors:
+  features:
+    - energy_v2
+    - rms_v
+    - p95_abs_v
+    - peak_abs_v
+    - crest_factor
+    - skewness
+    - kurtosis
+    - active_ratio
+    - pulse_count
+    - pulse_rate_hz
+    - mean_pulse_amp_v
+    - median_dt_s
+    - iqr_dt_s
+    - cv_dt
+    - burstiness
+    - event_center_frac
+    - event_width_frac
+  activity_features:
+    - energy_v2
+    - p95_abs_v
+    - peak_abs_v
+    - active_ratio
+    - pulse_count
+  change_features:
+    - energy_v2
+    - p95_abs_v
+    - peak_abs_v
+    - active_ratio
+    - pulse_count
+    - median_dt_s
+    - cv_dt
+    - kurtosis
+    - event_width_frac
+
+plots:
+  enabled: true
+
+report:
+  export_pdf: true
+  pdf_filename: "serie_1_2_study_report.pdf"
+
+output_dir: "outputs/mat_series_1_2"

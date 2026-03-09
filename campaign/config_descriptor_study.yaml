@@ -1,0 +1,56 @@
+study_name: "Material_State_Descriptor_Study"
+run_material_pipeline: false
+
+input:
+  event_csv: "outputs/material_state_outputs/delta_t_series_master.csv"
+  group_columns: []
+
+windowing:
+  window_events: 64
+  step_events: 16
+  min_valid_events: 32
+  max_valid_dt_s: 1.0
+  fano_bin_count: 8
+
+descriptors:
+  search_features:
+    - median_dt_s
+    - iqr_dt_s
+    - p90_dt_s
+    - cv_dt
+    - cv2_dt
+    - local_variation
+    - weibull_beta
+    - burstiness
+    - fano_factor
+    - phase_entropy
+    - phase_kuramoto_r
+    - phase_width_pos_deg
+    - phase_width_neg_deg
+  reserve_features:
+    - phase_inlier_ratio
+    - amplitude_balance_ratio
+    - mean_peak_v
+    - n_events
+
+tasks:
+  state:
+    type: "multiclass"
+    label_column: "stage"
+    fallback_time_segments: 3
+  alarm:
+    type: "binary"
+    label_column: "stage"
+    positive_values: [3]
+    fallback_time_segments: 3
+
+search:
+  n_splits: 5
+  random_seed: 42
+  top_k_features: 8
+  max_combo_size: 3
+  forward_selection_max_features: 5
+  score_tolerance: 0.01
+  redundancy_threshold: 0.85
+
+output_dir: "outputs/descriptor_study"

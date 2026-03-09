@@ -1,0 +1,45 @@
+campaign_name: "Capitulo_V_Material_Study"
+base_dir: "E:/Carpeta definitiva de Tesis/programas"
+output_dir: "outputs/material_state_study"
+
+dataset:
+  folder: "Prueba 3 - Ensayo de Fuentes Multiples Simultaneas"
+  channel: "CH3"
+  antenna_name: "AVA_propuesta"
+
+preprocess:
+  preserve_amplitude: true
+  centering: true
+  normalization: none
+  wavelet_denoise: true
+
+detection:
+  k_sigma: 5.0
+  refractory_ns: 20
+  noise_window_ns: 40
+
+analysis:
+  export_sensitivity_report: false
+  stage_aware: true
+  stage_boundaries_s: auto
+  max_valid_dt_s: 1.0
+  rolling_window_events: 50
+  ewma_alpha: 0.2
+  cusum_k: 0.5
+  cusum_h: 5.0
+  kalman_q: 1e-4
+  kalman_r: 1.0
+  bands_ghz:
+    - [0.0, 0.5]
+    - [0.5, 1.5]
+    - [1.5, 2.4]
+
+plots:
+  show_raw_with_detections: false
+  show_delta_t_series: false
+  show_delta_t_hist: false
+  show_rate_series: false
+  show_rolling_stats: false
+  show_ewma_cusum: false
+  show_advanced_stats: false
+  show_blind_prpd: false

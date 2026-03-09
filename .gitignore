@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+pip-wheel-metadata/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Output
+*.h5
+*.hdf5
+output/
+outputs/
+results/
+private_notes/
+.codex_docx_extract/
+pytest-cache-files-*/
+
+# Local campaign test configs
+campaign/config_material_test_*.yaml
+
+# Dev utility scripts (not part of framework)
+replace_python.py
+update_code.py
+_fix_encoding.py
+
+# Local bulky datasets and archives
+*.mat
+*.docx
+*.zip
