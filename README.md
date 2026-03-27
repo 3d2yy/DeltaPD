@@ -7,7 +7,7 @@ DeltaPD es un framework de analisis de descargas parciales UHF orientado a inves
 - estudios por adquisicion (`state` / `alarm`),
 - y comparativos entre tipos de descarga en `CH3`.
 
-El canal canonico de tesis es `CH3`. `CH2` .
+
 
 ![Blind PRPD P3](docs/images/blind_prpd_p3_material.png)
 
